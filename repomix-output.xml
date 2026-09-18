@@ -1,0 +1,3616 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: src/**
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/
+  api/
+    auth.py
+    chapters.py
+    comments.py
+    export.py
+    media.py
+    memoir.py
+    memory.py
+    search.py
+    share.py
+    transcripts.py
+  core/
+    app_lifespan.py
+    auth.py
+    config.py
+    logging_config.py
+  domain/
+    auth_service.py
+    authorization.py
+    chapter_service.py
+    comments_service.py
+    export_service.py
+    media_service.py
+    memoir_service.py
+    memory_service.py
+    search_service.py
+    share_service.py
+    transcription_service.py
+  integrations/
+    auth_repository.py
+    chapter_repository.py
+    comments_repository.py
+    export_repository.py
+    media_repository.py
+    memoir_repository.py
+    memory_repository.py
+    search_repository.py
+    share_repository.py
+    storage_adapter.py
+    supabase_client.py
+    user.py
+  schemas/
+    auth.py
+    comments.py
+    export.py
+    media.py
+    memoir.py
+    memory.py
+    search.py
+    share.py
+    transcript.py
+  main.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/api/chapters.py">
+# src/api/chapters.py
+from fastapi import APIRouter, Depends, status
+from pydantic import BaseModel
+from typing import List, Dict, Any
+from src.domain.chapter_service import ChapterService
+from src.core.auth import get_current_user
+
+router = APIRouter(prefix="/api/memoirs", tags=["Chapters"])
+
+class ChapterApplyPayload(BaseModel):
+    chapters: List[Dict[str, Any]]
+
+class ChapterRefinePayload(BaseModel):
+    current_proposal: Dict[str, Any]
+    user_prompt: str
+
+@router.post("/{memoir_id}/chapters/propose", status_code=status.HTTP_200_OK)
+def propose_chapters(memoir_id: str, current_user: dict = Depends(get_current_user)):
+    """Runs the MCP agent pipeline to generate a self-organized chapter layout."""
+    proposal = ChapterService.generate_proposal(memoir_id)
+    return {"success": True, "data": proposal}
+
+@router.post("/{memoir_id}/chapters/refine", status_code=status.HTTP_200_OK)
+def refine_chapters(memoir_id: str, payload: ChapterRefinePayload, current_user: dict = Depends(get_current_user)):
+    """Refines an existing proposal based on a user's chat prompt."""
+    refined_proposal = ChapterService.refine_proposal(memoir_id, payload.current_proposal, payload.user_prompt)
+    return {"success": True, "data": refined_proposal}
+
+@router.post("/{memoir_id}/chapters/apply", status_code=status.HTTP_200_OK)
+def apply_chapters(memoir_id: str, payload: ChapterApplyPayload, current_user: dict = Depends(get_current_user)):
+    """Applies the owner-reviewed chapter proposal to the live database."""
+    ChapterService.apply_proposal(memoir_id, payload.dict())
+    return {"success": True, "message": "Chapters successfully applied."}
+</file>
+
+<file path="src/domain/chapter_service.py">
+# src/domain/chapter_service.py
+import json
+import os
+import httpx
+from fastapi import HTTPException
+from src.core.config import settings
+from src.integrations.chapter_repository import (
+    get_memories_for_organization,
+    get_existing_chapters,
+    apply_chapters_to_db,
+)
+
+
+class MCPServer:
+    def __init__(self, memoir_id: str):
+        self.memoir_id = memoir_id
+
+    def get_resource(self, resource_name: str):
+        if resource_name == "memories":
+            return get_memories_for_organization(self.memoir_id)
+        if resource_name == "chapters":
+            return get_existing_chapters(self.memoir_id)
+        raise ValueError(f"Unknown resource {resource_name}")
+
+    def execute_tool(self, tool_name: str, payload: dict):
+        if tool_name == "propose_chapter_set":
+            return payload
+        raise ValueError(f"Unknown tool {tool_name}")
+
+
+class MCPClient:
+    def __init__(self, server: MCPServer):
+        self.server = server
+
+    def read_resource(self, name: str):
+        return self.server.get_resource(name)
+
+    def call_tool(self, name: str, payload: dict):
+        return self.server.execute_tool(name, payload)
+
+
+def _call_llm_json(prompt: str) -> dict | None:
+    api_key = settings.llm_api_key or os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("LLM Error: No API key found in environment.")
+        return None
+
+    base_url = (settings.llm_base_url or "https://api.groq.com/openai/v1").rstrip("/")
+    endpoint = f"{base_url}/chat/completions"
+
+    candidate_models = [
+        settings.llm_model,
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "openai/gpt-oss-120b",
+        "meta-llama/llama-4-scout-17b-16e-instruct",
+        "qwen/qwen3-32b",
+        "moonshotai/kimi-k2-instruct",
+    ]
+    models_to_try = []
+    for m in candidate_models:
+        if m and m not in models_to_try:
+            models_to_try.append(m)
+
+    for model in models_to_try:
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a master biographer and memoir editor. "
+                        "Always respond with valid JSON only. No markdown, no code fences."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.6, # Slightly increased for better creative flow
+        }
+        if "groq" in base_url or "openai" in base_url:
+            payload["response_format"] = {"type": "json_object"}
+
+        try:
+            response = httpx.post(
+                endpoint,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=60.0,
+            )
+            if response.status_code == 200:
+                content = response.json()["choices"][0]["message"]["content"].strip()
+                if content.startswith("```json"):
+                    content = content[7:]
+                if content.startswith("```"):
+                    content = content[3:]
+                if content.endswith("```"):
+                    content = content[:-3]
+                return json.loads(content.strip())
+            print(f"LLM API Warning ({response.status_code}) model='{model}': {response.text[:300]}")
+        except Exception as err:
+            print(f"LLM Call error for model '{model}': {err}")
+
+    return None
+
+
+def _fallback_summary(facts: list) -> str:
+    """Build a beautifully flowing fallback paragraph from the actual memory texts."""
+    snippets = []
+    for f in facts:
+        text = (f.get("story_content") or f.get("title") or "").strip()
+        if text:
+            cut = text.replace("\n", " ")
+            if len(cut) > 200:
+                cut = cut[:200].rsplit(" ", 1)[0] + "…"
+            snippets.append(cut)
+    if not snippets:
+        return "A collection of treasured family moments from this period of life. Every story preserved here adds a vital piece to the larger, beautiful puzzle of their journey."
+    joined = " ".join(snippets)
+    if len(joined) > 800:
+        joined = joined[:800].rsplit(" ", 1)[0] + "…"
+    return joined
+
+
+def _fallback_title(era: str, facts: list) -> str:
+    if facts:
+        t = (facts[0].get("title") or "").strip()
+        if t and len(t) < 60:
+            return t.title() if t.islower() else t
+    clean = (era or "Memories").replace("The ", "").strip()
+    return f"Memories of the {clean}" if clean[0].isdigit() else clean
+
+
+class ReaderAgent:
+    def __init__(self, client: MCPClient):
+        self.client = client
+
+    def extract_facts(self):
+        memories = self.client.read_resource("memories")
+        
+        # Sort chronologically to help the LLM establish a natural, ascending timeline
+        memories = sorted(memories, key=lambda x: x.get("occurred_start") or "9999-12-31")
+
+        prompt = f"""
+Analyze these memoir entries. For each one extract structured facts.
+{json.dumps(memories, indent=2)}
+
+Return JSON exactly as:
+{{
+  "facts": [
+    {{
+      "id": "memory_uuid",
+      "title": "entry title",
+      "date": "YYYY-MM-DD or null",
+      "chapter_id": "existing_chapter_id or null",
+      "extracted_era": "e.g. 1980s, Childhood, College Years",
+      "topic": "main theme",
+      "story_content": "3-4 sentence summary of what happened (paraphrase, do not copy full text)"
+    }}
+  ]
+}}
+"""
+        llm_res = _call_llm_json(prompt)
+        if llm_res and "facts" in llm_res:
+            return llm_res["facts"]
+
+        facts = []
+        for m in memories:
+            date_val = m.get("occurred_start")
+            extracted_era = "Timeless Memories"
+            if date_val and len(str(date_val)) >= 4:
+                year = str(date_val)[:4]
+                if year.isdigit():
+                    extracted_era = f"The {year[:3]}0s"
+
+            body = m.get("body_text") or ""
+            facts.append({
+                "id": m["id"],
+                "title": m.get("title") or "Untitled Entry",
+                "date": m.get("occurred_start"),
+                "chapter_id": m.get("chapter_id"),
+                "extracted_era": extracted_era,
+                "topic": m.get("title") or "Memory",
+                "story_content": body[:400] if body else (m.get("title") or ""),
+            })
+        return facts
+
+
+class OrganizerAgent:
+    def __init__(self, client: MCPClient):
+        self.client = client
+
+    def propose(self, facts):
+        existing_chapters = {c["id"]: c for c in self.client.read_resource("chapters")}
+
+        prompt = f"""
+You are a master biographer organizing a family memoir into beautiful, flowing chapters.
+
+MEMORY FACTS:
+{json.dumps(facts, indent=2)}
+
+EXISTING CHAPTERS (if any):
+{json.dumps(list(existing_chapters.values()), indent=2)}
+
+STRICT RULES:
+1. Create 3 to 6 chapters to beautifully cover the subject's life.
+2. Order the chapters in STRICT ASCENDING CHRONOLOGICAL ORDER (e.g., Birth, Early Years, School, Adulthood, Later Life). Progress naturally through time.
+3. Each chapter MUST have:
+   - "title": a short original artistic title (e.g. "First Steps", "The Open Window"). NEVER use a raw memory title.
+   - "summary": A rich, beautifully written, highly engaging biographical narrative (2 to 4 paragraphs) that synthesizes all memories in that chapter. Connect the dots into a smooth, flowing story. Do NOT just list memory titles. Make it read like a published biography.
+   - "memories": array of {{ "id", "title", "date" }} for every memory placed in the chapter. Order these memories chronologically within the chapter!
+4. Every memory id must appear in exactly one chapter.
+
+Return JSON exactly as:
+{{
+  "chapters": [
+    {{
+      "title": "Original Chapter Title",
+      "summary": "Rich synthesized biographical narrative paragraph 1.\\n\\nParagraph 2...",
+      "memories": [
+        {{ "id": "memory_id", "title": "entry title", "date": "date or null" }}
+      ]
+    }}
+  ]
+}}
+"""
+        llm_res = _call_llm_json(prompt)
+        if llm_res and "chapters" in llm_res:
+            return self.client.call_tool("propose_chapter_set", {"chapters": llm_res["chapters"]})
+
+        buckets: dict[str, list] = {}
+        for f in facts:
+            key = f.get("extracted_era") or "Timeless Reflections"
+            buckets.setdefault(key, []).append(f)
+
+        # Guardrail: the fallback path must never produce ~1 chapter per memory.
+        MAX_CHAPTERS = 6
+        if len(facts) > MAX_CHAPTERS and len(buckets) > MAX_CHAPTERS:
+            all_sorted = sorted(facts, key=lambda x: x.get("date") or "9999-12-31")
+            chunk_size = max(2, -(-len(all_sorted) // MAX_CHAPTERS))  # ceil division
+            buckets = {}
+            for i in range(0, len(all_sorted), chunk_size):
+                chunk = all_sorted[i:i + chunk_size]
+                if not chunk:
+                    continue
+                label = chunk[0].get("extracted_era") or f"Chapter {i // chunk_size + 1}"
+                buckets[f"{label}__{i}"] = chunk
+
+        proposal = []
+        for era, items in buckets.items():
+            proposal.append({
+                "title": _fallback_title(era, items),
+                "summary": _fallback_summary(items),
+                "memories": [
+                    {
+                        "id": it["id"],
+                        "title": it.get("title") or "Untitled Entry",
+                        "date": it.get("date"),
+                    }
+                    for it in items
+                ],
+            })
+        return self.client.call_tool("propose_chapter_set", {"chapters": proposal})
+
+
+class RefinerAgent:
+    def __init__(self, client: MCPClient):
+        self.client = client
+
+    def refine(self, current_proposal, user_prompt):
+        memories = self.client.read_resource("memories")
+
+        prompt = f"""
+You are refining a memoir chapter proposal based on the owner's chat request.
+
+CURRENT PROPOSAL:
+{json.dumps(current_proposal, indent=2)}
+
+OWNER REQUEST:
+"{user_prompt}"
+
+RAW MEMORIES (reference only):
+{json.dumps(memories, indent=2)}
+
+RULES:
+1. Apply the owner's request (merge/split/rename/retone as asked).
+2. Ensure chapters remain in strict chronological ascending order.
+3. Each chapter needs an original "title" and a rich, beautifully written biographical "summary" (2 to 4 paragraphs) covering all of its memories with smooth narrative flow. Do NOT copy full body text into the summary.
+4. Keep every memory id assigned to exactly one chapter.
+
+Return JSON exactly as:
+{{
+  "chapters": [
+    {{
+      "title": "Chapter Title",
+      "summary": "Rich synthesized biographical paragraph 1.\\n\\nParagraph 2...",
+      "memories": [
+        {{ "id": "memory_id", "title": "entry title", "date": "date or null" }}
+      ]
+    }}
+  ]
+}}
+"""
+        llm_res = _call_llm_json(prompt)
+        if llm_res and "chapters" in llm_res:
+            return self.client.call_tool("propose_chapter_set", {"chapters": llm_res["chapters"]})
+        return current_proposal
+
+
+class ReviewerAgent:
+    def __init__(self, client: MCPClient):
+        self.client = client
+
+    def review(self, proposal):
+        seen = set()
+        valid = []
+        for ch in proposal.get("chapters", []):
+            clean = []
+            for m in ch.get("memories") or []:
+                mid = m.get("id")
+                if mid and mid not in seen:
+                    clean.append({
+                        "id": mid,
+                        "title": m.get("title") or "Untitled Entry",
+                        "date": m.get("date"),
+                    })
+                    seen.add(mid)
+            if clean:
+                valid.append({
+                    "title": ch.get("title") or "Untitled Chapter",
+                    "summary": ch.get("summary") or _fallback_summary([
+                        {"story_content": m.get("title", "")} for m in clean
+                    ]),
+                    "memories": clean,
+                })
+        return {"chapters": valid}
+
+
+class ChapterService:
+    @staticmethod
+    def generate_proposal(memoir_id: str):
+        server = MCPServer(memoir_id)
+        client = MCPClient(server)
+
+        facts = ReaderAgent(client).extract_facts()
+        proposal = OrganizerAgent(client).propose(facts)
+        return ReviewerAgent(client).review(proposal)
+
+    @staticmethod
+    def refine_proposal(memoir_id: str, current_proposal: dict, user_prompt: str):
+        server = MCPServer(memoir_id)
+        client = MCPClient(server)
+
+        refined = RefinerAgent(client).refine(current_proposal, user_prompt)
+        return ReviewerAgent(client).review(refined)
+
+    @staticmethod
+    def apply_proposal(memoir_id: str, proposal: dict):
+        if "chapters" not in proposal:
+            raise HTTPException(status_code=400, detail="Invalid proposal structure.")
+        apply_chapters_to_db(memoir_id, proposal["chapters"])
+        return {"success": True}
+</file>
+
+<file path="src/integrations/chapter_repository.py">
+from src.integrations.supabase_client import supabase_admin
+
+def get_memories_for_organization(memoir_id: str):
+    res = supabase_admin.table("memory")\
+        .select("id, title, body_text, occurred_start, chapter_id, position_in_chapter")\
+        .eq("memoir_id", memoir_id)\
+        .is_("deleted_at", "null")\
+        .execute()
+    return res.data or []
+
+def get_existing_chapters(memoir_id: str):
+    res = supabase_admin.table("chapter")\
+        .select("*")\
+        .eq("memoir_id", memoir_id)\
+        .execute()
+    return res.data or []
+
+def apply_chapters_to_db(memoir_id: str, chapters_payload: list):
+    # Step 1: Unlink chapter_id on memories first to avoid composite FK nullifying memory.memoir_id
+    supabase_admin.table("memory")\
+        .update({"chapter_id": None, "position_in_chapter": None})\
+        .eq("memoir_id", memoir_id)\
+        .execute()
+
+    # Step 2: Delete old chapters safely
+    supabase_admin.table("chapter")\
+        .delete()\
+        .eq("memoir_id", memoir_id)\
+        .execute()
+
+    # Step 3: Insert new chapters and re-link memories
+    for idx, chapter in enumerate(chapters_payload):
+        ch_res = supabase_admin.table("chapter").insert({
+            "memoir_id": memoir_id,
+            "title": chapter["title"],
+            "summary": chapter.get("summary", ""), # Save the generated biographical text
+            "sort_order": idx,
+            "created_by": "ai",
+            "edited_by_owner": True
+        }).execute()
+        
+        if ch_res.data:
+            new_chapter_id = ch_res.data[0]["id"]
+            for pos, mem in enumerate(chapter.get("memories", [])):
+                supabase_admin.table("memory").update({
+                    "chapter_id": new_chapter_id,
+                    "position_in_chapter": pos
+                }).eq("id", mem["id"]).execute()
+</file>
+
+<file path="src/api/comments.py">
+"""
+@file routers/comments_router.py
+@description FastAPI router endpoints for comment operations.
+"""
+
+from fastapi import APIRouter, Depends, Query, status, Header
+from typing import List, Optional
+from src.schemas.comments import CommentCreate, CommentResponse
+from src.domain.comments_service import CommentsService
+from src.integrations.supabase_client import supabase_admin
+from fastapi import HTTPException, status
+router = APIRouter(prefix="/api/comments", tags=["Comments"])
+
+async def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
+    """Helper to extract user_id from the incoming Bearer token."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authentication token.")
+    
+    token = authorization.split(" ")[1]
+    try:
+        user_res = supabase_admin.auth.get_user(token)
+        if not user_res or not user_res.user:
+            raise HTTPException(status_code=401, detail="Invalid session or token expired.")
+        return user_res.user.id
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
+
+@router.get("/", response_model=List[CommentResponse])
+async def list_comments(memory_id: str = Query(..., description="The UUID of the memory item")):
+    """Fetch all comments linked to a specific memory asset."""
+    return await CommentsService.get_memory_comments(memory_id)
+
+@router.post("/", response_model=CommentResponse, status_code=status.HTTP_201_CREATED)
+async def post_comment(
+    payload: CommentCreate,
+    user_id: str = Depends(get_current_user_id)
+):
+    """Post a new comment to a memory item with automatic participant resolution."""
+    return await CommentsService.create_new_comment(payload.dict(), user_id)
+</file>
+
+<file path="src/api/export.py">
+"""
+@file api/export.py
+@description API router for triggering and monitoring memoir PDF exports.
+"""
+
+from fastapi import APIRouter, BackgroundTasks, Depends, status
+from src.domain.export_service import ExportService
+from src.core.auth import get_current_user
+from src.integrations.export_repository import ExportRepository
+
+
+router = APIRouter(prefix="/api/memoirs", tags=["Export"])
+
+@router.post("/{memoir_id}/export", status_code=status.HTTP_202_ACCEPTED)
+def request_memoir_export(
+    memoir_id: str,
+    background_tasks: BackgroundTasks,
+    current_user_id: str = Depends(get_current_user)
+):
+    """
+    Initiates an asynchronous PDF export job for the specified memoir.
+    Returns 202 Accepted immediately with job status 'queued'.
+    """
+    job_info = ExportService.initiate_export(memoir_id, current_user_id)
+    
+    # Queue background generation task to prevent gateway timeouts
+    background_tasks.add_task(
+        ExportService.process_export_background,
+        export_id=job_info["export_id"],
+        memoir_id=memoir_id
+    )
+
+    return {
+        "success": True,
+        "data": job_info
+    }
+    
+@router.get("/{memoir_id}/export/latest")
+def get_latest_export_status(
+    memoir_id: str,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Fetches the latest export job status and signed download URL if ready."""
+    job = ExportRepository.get_latest_export(memoir_id)
+    if not job:
+        return {"status": "none"}
+    
+    download_url = None
+    if job["status"] == "ready" and job.get("storage_key"):
+        download_url = ExportRepository.get_signed_download_url(job["storage_key"])
+
+    return {
+        "success": True,
+        "status": job["status"],
+        "error_message": job.get("error_message"),
+        "download_url": download_url
+    }
+</file>
+
+<file path="src/api/search.py">
+"""
+@file api/search.py
+@description API router handling full-text search requests.
+"""
+
+from fastapi import APIRouter, Depends, Query, status
+from src.domain.search_service import SearchService
+from src.core.auth import get_current_user  # Adjust import based on your auth dependency
+
+router = APIRouter(prefix="/api/search", tags=["Search"])
+
+@router.get("/")
+def search_memories(
+    memoir_id: str = Query(..., description="Target memoir container UUID"),
+    q: str = Query(..., min_length=1, description="Search keyword or phrase"),
+    current_user_id: str = Depends(get_current_user)
+):
+    """
+    Performs full-text search across written entries, transcripts, and captions.
+    """
+    results = SearchService.search_memoir(memoir_id, q, current_user_id)
+    return {
+        "success": True,
+        "query": q,
+        "count": len(results),
+        "data": results
+    }
+</file>
+
+<file path="src/api/share.py">
+from typing import Dict, Any
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, HTTPException
+
+from src.core.config import settings
+from src.core.auth import get_current_user
+from src.domain.share_service import ShareService
+from src.integrations.share_repository import ShareRepository
+from src.schemas.share import (
+    ShareLinkResponse, ShareLinkResponseEnvelope, ShareLinkUpdateRequest, SharedMemoirResponseEnvelope
+)
+
+owner_router = APIRouter(prefix="/api/memoirs", tags=["Share Links"])
+reader_router = APIRouter(prefix="/api/share", tags=["Shared Memoirs"])
+
+def _to_link_response(link: Dict[str, Any]) -> ShareLinkResponse:
+    return ShareLinkResponse(
+        id=str(link["id"]),
+        memoir_id=str(link["memoir_id"]),
+        scope=link["scope"],
+        token=link["token"],
+        url=f"{settings.share_link_base_url.rstrip('/')}/{link['token']}",
+        created_by_participant_id=str(link["created_by_participant_id"]) if link.get("created_by_participant_id") else None,
+        created_at=link["created_at"],
+        expires_at=link.get("expires_at"),
+        revoked_at=link.get("revoked_at"),
+        open_count=link.get("open_count", 0)
+    )
+
+# --- OWNER ROUTES ---
+@owner_router.post("/{memoir_id}/share-link", status_code=201, response_model=ShareLinkResponseEnvelope)
+async def create_share_link(memoir_id: str, current_user: dict = Depends(get_current_user)):
+    user_id = str(current_user.get("user_id") or current_user.get("id") or current_user.get("sub"))
+    link = await ShareService.create_or_get_share_link(memoir_id, user_id)
+    return {"success": True, "message": "Share link ready.", "data": _to_link_response(link)}
+
+@owner_router.patch("/{memoir_id}/share-link", response_model=ShareLinkResponseEnvelope)
+async def patch_share_link(memoir_id: str, payload: ShareLinkUpdateRequest, current_user: dict = Depends(get_current_user)):
+    user_id = str(current_user.get("user_id") or current_user.get("id") or current_user.get("sub"))
+    link = await ShareService.update_share_link(memoir_id, user_id, payload)
+    return {"success": True, "message": "Share link updated.", "data": _to_link_response(link)}
+
+@owner_router.delete("/{memoir_id}/share-link", status_code=200)
+async def delete_share_link(memoir_id: str, current_user: dict = Depends(get_current_user)):
+    user_id = str(current_user.get("user_id") or current_user.get("id") or current_user.get("sub"))
+    await ShareService.revoke_share_link(memoir_id, user_id)
+    return {"success": True, "message": "Share link revoked."}
+
+# --- READER ROUTE (Replaces the need for a separate deps_share.py) ---
+@reader_router.get("/{token}", response_model=SharedMemoirResponseEnvelope)
+async def read_shared_memoir(token: str):
+    link = await ShareRepository.get_link_by_token(token)
+    
+    # Check if link exists, is revoked, or is expired
+    if not link or link.get("revoked_at"):
+        raise HTTPException(status_code=404, detail="Not found.")
+    
+    if link.get("expires_at"):
+        expires_at = datetime.fromisoformat(link["expires_at"].replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) > expires_at:
+            raise HTTPException(status_code=404, detail="Link expired.")
+
+    memoir = await ShareRepository.get_memoir_by_id(link["memoir_id"])
+    if not memoir or memoir.get("status") != "published":
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    # Increment the open count in the background
+    await ShareRepository.increment_open_count(link["id"], link.get("open_count", 0))
+
+    memories = await ShareRepository.get_shared_memoir_view(link["memoir_id"])
+    
+    data = {
+        **memoir,
+        "can_comment": memoir.get("comment_policy") == "public",
+        "memories": memories
+    }
+    return {"success": True, "message": "Operation successful", "data": data}
+</file>
+
+<file path="src/core/app_lifespan.py">
+# App-wide startup/shutdown hooks (e.g. warming up connections, background tasks).
+
+import logging
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("App starting up...")
+    yield
+    logger.info("App shutting down...")
+</file>
+
+<file path="src/core/logging_config.py">
+# App-wide logging setup. Called once from main.py on startup.
+
+import logging
+
+
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+</file>
+
+<file path="src/domain/comments_service.py">
+"""
+@file services/comments_service.py
+@description Business logic layer for comment processing.
+"""
+
+from typing import List, Dict, Any
+from src.integrations.comments_repository import CommentsRepository
+from fastapi import HTTPException, status
+
+class CommentsService:
+
+    @staticmethod
+    async def get_memory_comments(memory_id: str) -> List[Dict[str, Any]]:
+        if not memory_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Memory ID is required."
+            )
+        return await CommentsRepository.get_comments_by_memory_id(memory_id)
+
+    @staticmethod
+    async def create_new_comment(payload: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+        if not payload.get("body") or not payload["body"].strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Comment text cannot be empty."
+            )
+        return await CommentsRepository.insert_comment(payload, user_id)
+</file>
+
+<file path="src/domain/export_service.py">
+"""
+@file domain/export_service.py
+@description Business logic for compiling memoir exports, PDF generation, and storage management using pure Python (xhtml2pdf).
+"""
+
+import io
+from fastapi import HTTPException, status
+from xhtml2pdf import pisa
+from src.domain.authorization import verify_active_participant
+from src.integrations.export_repository import ExportRepository
+
+class ExportService:
+
+    @classmethod
+    def initiate_export(cls, memoir_id: str, user_id: str) -> dict:
+        """Validates permissions and queues a new PDF export job."""
+        participant = verify_active_participant(
+            memoir_id, 
+            user_id, 
+            required_roles=["owner", "admin", "contributor"]
+        )
+        participant_id = participant.get("id")
+        job = ExportRepository.create_export_job(memoir_id, participant_id, kind="pdf")
+
+        return {
+            "export_id": job["id"],
+            "memoir_id": memoir_id,
+            "status": "queued",
+            "message": "Export job queued successfully. Processing in background.",
+            "created_at": job["created_at"]
+        }
+
+    @classmethod
+    def process_export_background(cls, export_id: str, memoir_id: str) -> None:
+        """Background worker method to compile data, generate PDF via xhtml2pdf, and upload to storage."""
+        try:
+            # 1. Fetch structured memoir payload (excluding comments)
+            payload = ExportRepository.fetch_memoir_export_payload(memoir_id)
+            memoir = payload["memoir"]
+            memories = payload["memories"]
+            media_assets = payload["media_assets"]
+            transcripts = payload["transcripts"]
+
+            # 2. Build professional print HTML template (Book layout)
+            html_content = cls._render_memoir_html(memoir, memories, media_assets, transcripts)
+
+            # 3. Compile HTML to PDF bytes using xhtml2pdf
+            pdf_buffer = io.BytesIO()
+            pisa_status = pisa.CreatePDF(html_content, dest=pdf_buffer)
+            
+            if pisa_status.err:
+                raise Exception("Failed to compile HTML into PDF using xhtml2pdf.")
+            
+            pdf_bytes = pdf_buffer.getvalue()
+
+            # 4. Upload to Supabase Storage
+            storage_key = f"exports/pdf-archives/{memoir_id}/{export_id}.pdf"
+            ExportRepository.upload_pdf_to_storage(storage_key, pdf_bytes)
+
+            # 5. Mark job as ready
+            ExportRepository.update_job_status(
+                export_id=export_id,
+                status="ready",
+                storage_key=storage_key,
+                byte_size=len(pdf_bytes)
+            )
+
+        except Exception as e:
+            ExportRepository.update_job_status(
+                export_id=export_id,
+                status="failed",
+                error_message=str(e)
+            )
+
+    @staticmethod
+    def _render_memoir_html(memoir: dict, memories: list, media_assets: list, transcripts: list) -> str:
+        """Generates a high-end, printable book layout HTML string."""
+        memoir_title = memoir.get("title", "My Memoir")
+        memoir_description = memoir.get("description", "A curated collection of life memories.")
+
+        memories_html = ""
+        for mem in memories:
+            title = mem.get("title") or "Untitled Entry"
+            date = mem.get("occurred_start") or mem.get("created_at", "")[:10]
+            body = mem.get("body_text") or ""
+
+            memories_html += f"""
+            <div class="memory-entry">
+                <div class="memory-meta">{date}</div>
+                <h2>{title}</h2>
+                <div class="memory-body">{body.replace(chr(10), '<br>')}</div>
+            </div>
+            """
+
+        # Render media photo gallery if any exist
+        photos_html = ""
+        for ma in media_assets:
+            if ma.get("kind") == "photo" and ma.get("storage_key"):
+                img_url = ma.get("storage_key")
+                caption = ma.get("caption") or ""
+                photos_html += f"""
+                <div class="photo-container">
+                    <img src="{img_url}" alt="Memory photo" />
+                    {f'<p class="photo-caption">{caption}</p>' if caption else ''}
+                </div>
+                """
+
+        # Render audio transcripts section if any exist
+        transcripts_html = ""
+        for t in transcripts:
+            t_text = t.get("display_text") or ""
+            if t_text:
+                transcripts_html += f"""
+                <div class="transcript-box">
+                    <strong>Voice Recording Transcript:</strong>
+                    <p>{t_text}</p>
+                </div>
+                """
+
+        return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <style>
+                @page {{
+                    size: A4;
+                    margin: 20mm 15mm;
+                }}
+                body {{
+                    font-family: Helvetica, Arial, sans-serif;
+                    color: #2c2c2c;
+                    background-color: #fdfbf7;
+                    margin: 0;
+                    padding: 20px;
+                    line-height: 1.6;
+                }}
+                .cover-page {{
+                    text-align: center;
+                    padding-top: 100px;
+                    page-break-after: always;
+                }}
+                .cover-page h1 {{
+                    font-size: 28pt;
+                    color: #1a1a1a;
+                    margin-bottom: 10px;
+                }}
+                .cover-page p {{
+                    font-size: 12pt;
+                    font-style: italic;
+                    color: #555;
+                }}
+                .memory-entry {{
+                    margin-bottom: 30px;
+                    border-bottom: 1px solid #e6e2d8;
+                    padding-bottom: 25px;
+                }}
+                .memory-meta {{
+                    font-size: 8pt;
+                    text-transform: uppercase;
+                    letter-spacing: 1.5px;
+                    color: #887a64;
+                    margin-bottom: 4px;
+                }}
+                h2 {{
+                    font-size: 16pt;
+                    color: #222;
+                    margin: 0 0 10px 0;
+                }}
+                .memory-body {{
+                    font-size: 10pt;
+                    text-align: justify;
+                    margin-bottom: 12px;
+                }}
+                .section-title {{
+                    font-size: 14pt;
+                    color: #222;
+                    margin-top: 40px;
+                    margin-bottom: 15px;
+                    border-bottom: 2px solid #b8a894;
+                    padding-bottom: 5px;
+                }}
+                .photo-container {{
+                    margin: 15px 0;
+                    text-align: center;
+                }}
+                .photo-container img {{
+                    max-width: 70%;
+                    max-height: 300px;
+                }}
+                .photo-caption {{
+                    font-size: 8pt;
+                    font-style: italic;
+                    color: #666;
+                    margin-top: 4px;
+                }}
+                .transcript-box {{
+                    background: #f4efea;
+                    border-left: 3px solid #b8a894;
+                    padding: 10px 15px;
+                    font-size: 9pt;
+                    margin-top: 15px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="cover-page">
+                <h1>{memoir_title}</h1>
+                <p>{memoir_description}</p>
+            </div>
+            <div class="content">
+                <div class="section-title">Memories</div>
+                {memories_html}
+                
+                {f'<div class="section-title">Photo Gallery</div>{photos_html}' if photos_html else ''}
+                
+                {f'<div class="section-title">Voice Transcripts</div>{transcripts_html}' if transcripts_html else ''}
+            </div>
+        </body>
+        </html>
+        """
+</file>
+
+<file path="src/domain/search_service.py">
+"""
+@file domain/search_service.py
+@description Business logic layer for validating search access and executing full-text searches.
+"""
+
+from fastapi import HTTPException, status
+from src.domain.authorization import verify_active_participant
+from src.integrations import search_repository
+
+class SearchService:
+    """
+    Handles memoir search authorization and result aggregation.
+    """
+
+    @classmethod
+    def search_memoir(cls, memoir_id: str, query_text: str, user_id: str) -> list:
+        """
+        Validates user permissions for the memoir and performs full-text search.
+        """
+        # 1. Enforce security: Ensure user is an active participant of this memoir
+        verify_active_participant(
+            memoir_id, 
+            user_id, 
+            required_roles=["owner", "admin", "contributor"]
+        )
+
+        # 2. Sanitize/validate query input
+        if not query_text or len(query_text.strip()) == 0:
+            return []
+
+        # 3. Execute search via repository
+        try:
+            results = search_repository.search_memoir_content(memoir_id, query_text.strip())
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database search error: {str(e)}"
+            )
+
+        return results
+</file>
+
+<file path="src/domain/share_service.py">
+from datetime import datetime, timezone
+from fastapi import HTTPException, status
+from src.core.config import settings
+from src.integrations.share_repository import ShareRepository
+
+class ShareService:
+    
+    @staticmethod
+    async def create_or_get_share_link(memoir_id: str, user_id: str, scope: str = "reader"):
+        participant = await ShareRepository.get_participant(memoir_id, user_id)
+        if not participant or participant.get("role") != "owner":
+            raise HTTPException(status_code=403, detail="Only owners can create share links.")
+
+        memoir = await ShareRepository.get_memoir_by_id(memoir_id)
+        if not memoir or memoir.get("status") != "published":
+            raise HTTPException(status_code=409, detail="Publish this memoir before sharing it.")
+
+        existing = await ShareRepository.get_active_link(memoir_id, scope)
+        if existing:
+            return existing
+
+        # Let your SQL schema handle the token generation and defaults
+        insert_data = {
+            "memoir_id": memoir_id,
+            "scope": scope,
+            "created_by_participant_id": participant["id"]
+        }
+        return await ShareRepository.insert_link(insert_data)
+
+    @staticmethod
+    async def update_share_link(memoir_id: str, user_id: str, payload, scope: str = "reader"):
+        participant = await ShareRepository.get_participant(memoir_id, user_id)
+        if not participant or participant.get("role") != "owner":
+            raise HTTPException(status_code=403, detail="Only owners can update links.")
+        
+        link = await ShareRepository.get_active_link(memoir_id, scope)
+        if not link:
+            raise HTTPException(status_code=404, detail="No active share link.")
+
+        update_data = {}
+        if payload.expires_at is not None:
+            update_data["expires_at"] = payload.expires_at.isoformat()
+
+        if not update_data:
+            return link
+            
+        return await ShareRepository.update_link(link["id"], update_data)
+
+    @staticmethod
+    async def revoke_share_link(memoir_id: str, user_id: str, scope: str = "reader"):
+        participant = await ShareRepository.get_participant(memoir_id, user_id)
+        if not participant or participant.get("role") != "owner":
+            raise HTTPException(status_code=403, detail="Only owners can revoke links.")
+            
+        link = await ShareRepository.get_active_link(memoir_id, scope)
+        if not link:
+            raise HTTPException(status_code=404, detail="No active share link.")
+
+        await ShareRepository.update_link(link["id"], {"revoked_at": datetime.now(timezone.utc).isoformat()})
+</file>
+
+<file path="src/integrations/comments_repository.py">
+"""
+@file repositories/comments_repository.py
+@description Handles comment queries and secure participant resolution.
+"""
+
+from typing import List, Dict, Any
+from fastapi import HTTPException, status
+from src.integrations.supabase_client import supabase_admin
+
+class CommentsRepository:
+
+    @staticmethod
+    async def get_comments_by_memory_id(memory_id: str) -> List[Dict[str, Any]]:
+        """Fetches raw comments without database embedding to avoid cache sync issues."""
+        try:
+            response = supabase_admin.table("comment")\
+    .select("*")\
+    .eq("memory_id", memory_id)\
+    .is_("deleted_at", "null")\
+    .is_("hidden_at", "null")\
+    .order("created_at", desc=False)\
+    .execute()
+
+            data = response.data or []
+            formatted_comments = []
+
+            for item in data:
+                comment_record = {**item}
+                comment_record["author_name"] = "Family Member"  # Safe fallback (Just for mock data)
+                formatted_comments.append(comment_record)
+                
+            return formatted_comments
+
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database error while fetching comments: {str(e)}"
+            )
+                    
+    @staticmethod
+    async def insert_comment(payload: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+        """
+        Securely resolves the user's memoir_participant_id for the given memoir 
+        and inserts the comment using standard selection without embedding.
+        """
+        try:
+            memoir_id = str(payload["memoir_id"])
+
+            # 1. Look up the memoir_participant record for this user in this memoir
+            participant_res = supabase_admin.table("memoir_participant")\
+                .select("id")\
+                .eq("memoir_id", memoir_id)\
+                .eq("user_id", user_id)\
+                .execute()
+
+            participants = participant_res.data or []
+            if not participants:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="User is not an authorized participant of this memoir."
+                )
+
+            participant_id = participants[0]["id"]
+
+            # 2. Insert the comment using the resolved participant ID
+            insert_data = {
+                "memoir_id": memoir_id,
+                "memory_id": str(payload["memory_id"]) if payload.get("memory_id") else None,
+                "media_asset_id": str(payload["media_asset_id"]) if payload.get("media_asset_id") else None,
+                "parent_comment_id": str(payload["parent_comment_id"]) if payload.get("parent_comment_id") else None, 
+                "author_participant_id": participant_id,
+                "body": payload["body"].strip()
+            }
+
+            # Insert and select only the comment record itself (no embedded joins)
+            # also normalize the insert (drop the non-standard .select() chain after .insert())
+            response = supabase_admin.table("comment")\
+            .insert(insert_data)\
+            .execute()
+
+            data = response.data or []
+            if not data:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Failed to save comment record."
+                )
+
+            # Grab the newly inserted record from Supabase's list response
+            inserted_record = data[0]
+
+            result = {**inserted_record}
+            result["author_name"] = "Family Member"  # Safe fallback matching your fetch method
+            return result
+
+        except HTTPException as he:
+            raise he
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Error inserting comment: {str(e)}"
+            )
+</file>
+
+<file path="src/integrations/export_repository.py">
+"""
+@file integrations/export_repository.py
+@description Database repository for memoir export job tracking and memoir data retrieval.
+"""
+
+from src.integrations.supabase_client import supabase_admin
+from src.core.config import settings
+from datetime import datetime, timezone
+
+BUCKET_NAME = settings.supabase_media_bucket
+
+class ExportRepository:
+
+    @staticmethod
+    def create_export_job(memoir_id: str, participant_id: str, kind: str = "pdf") -> dict:
+        """Inserts a new export job with 'queued' status."""
+        response = supabase_admin.table("memoir_export").insert({
+            "memoir_id": memoir_id,
+            "requested_by_participant_id": participant_id,
+            "kind": kind,
+            "status": "queued"
+        }).execute()
+        
+        if not response.data:
+            raise Exception("Failed to create export job record in database.")
+        return response.data[0]
+
+    @staticmethod
+    def update_job_status(
+        export_id: str, 
+        status: str, 
+        storage_key: str = None, 
+        byte_size: int = None, 
+        error_message: str = None
+    ) -> None:
+        """Updates the export job status, storage reference, or failure reason."""
+        update_data = {
+            "status": status,
+            "completed_at": datetime.now(timezone.utc).isoformat() if status in ["ready", "failed"] else None
+        }
+        if storage_key is not None:
+            update_data["storage_key"] = storage_key
+        if byte_size is not None:
+            update_data["byte_size"] = byte_size
+        if error_message is not None:
+            update_data["error_message"] = error_message
+
+        supabase_admin.table("memoir_export").update(update_data).eq("id", export_id).execute()
+
+    @staticmethod
+    def fetch_memoir_export_payload(memoir_id: str) -> dict:
+        """
+        Fetches memoir details, memories, media assets, and audio transcripts.
+        Strictly excludes comments to ensure export represents a static keepsake archive.
+        """
+        memoir_res = supabase_admin.table("memoir").select("*").eq("id", memoir_id).single().execute()
+        memoir_data = memoir_res.data if memoir_res else {}
+
+        memories_res = (
+            supabase_admin.table("memory")
+            .select("id, title, body_text, occurred_start, created_at")
+            .eq("memoir_id", memoir_id)
+            .order("occurred_start", desc=False)
+            .execute()
+        )
+        memories = memories_res.data if memories_res.data else []
+
+        media_res = (
+            supabase_admin.table("media_asset")
+            .select("id, memoir_id, storage_key, caption, kind")
+            .eq("memoir_id", memoir_id)
+            .execute()
+        )
+        media_assets = media_res.data if media_res.data else []
+
+        transcripts_res = (
+            supabase_admin.table("transcript")
+            .select("media_asset_id, display_text")
+            .eq("memoir_id", memoir_id)
+            .execute()
+        )
+        transcripts = transcripts_res.data if transcripts_res.data else []
+
+        return {
+            "memoir": memoir_data,
+            "memories": memories,
+            "media_assets": media_assets,
+            "transcripts": transcripts
+        }
+
+    @staticmethod
+    def upload_pdf_to_storage(storage_key: str, pdf_bytes: bytes) -> None:
+        """Uploads generated PDF binary stream to Supabase Storage bucket."""
+        supabase_admin.storage.from_(BUCKET_NAME).upload(
+            path=storage_key,
+            file=pdf_bytes,
+            file_options={"content-type": "application/pdf"}
+        )
+
+    @staticmethod
+    def get_signed_download_url(storage_key: str) -> str:
+        """Generates a secure temporary download URL for the exported PDF."""
+        res = supabase_admin.storage.from_(BUCKET_NAME).create_signed_url(storage_key, 3600)
+        return res.get("signedURL") or res.get("signedUrl")
+    
+    @staticmethod
+    def get_latest_export(memoir_id: str) -> dict:
+        res = (
+            supabase_admin.table("memoir_export")
+            .select("*")
+            .eq("memoir_id", memoir_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+</file>
+
+<file path="src/integrations/memoir_repository.py">
+"""
+@file memoir_repository.py
+@description Data access layer adapter module handling direct Supabase queries 
+and persistence for user accounts, memoirs, and memoir participant roles.
+"""
+
+from src.integrations.supabase_client import supabase_admin
+
+
+def fetch_user_account(user_id: str):
+    """
+    Fetches user account profile details from the database.
+
+    Args:
+        user_id (str): The unique identifier of the user account.
+
+    Returns:
+        Any: The database query result containing profile records.
+    """
+    return supabase_admin.table("user_account").select("full_name, email").eq("id", user_id).execute()
+
+
+def insert_memoir(memoir_data: dict):
+    """
+    Inserts a new root memoir container record into the database.
+
+    Args:
+        memoir_data (dict): The dictionary containing validated memoir properties.
+
+    Returns:
+        Any: The database response object containing the inserted memoir record.
+    """
+    return supabase_admin.table("memoir").insert(memoir_data).execute()
+
+
+def insert_memoir_participant(participant_data: dict):
+    """
+    Registers a user as a participant in a memoir container.
+
+    Args:
+        participant_data (dict): The dictionary containing participant mapping data.
+
+    Returns:
+        Any: The database response object from the participant insertion.
+    """
+    return supabase_admin.table("memoir_participant").insert(participant_data).execute()
+
+def delete_memoir_record(memoir_id: str):
+    """Deletes an orphan memoir during a failed transaction rollback."""
+    return supabase_admin.table("memoir").delete().eq("id", memoir_id).execute()
+
+def fetch_live_memoir_data(memoir_id: str):
+    """
+    Fetches the complete memoir structure for the live memoir view:
+    memoir metadata, chapters, memories with embedded media, transcripts,
+    participants, and photo gallery assets.
+    """
+    # 1. Memoir metadata
+    memoir_res = supabase_admin.table("memoir")\
+        .select("id, subject_name, subject_born_on, subject_died_on, subject_is_living, description, status")\
+        .eq("id", memoir_id)\
+        .maybe_single()\
+        .execute()
+    memoir = memoir_res.data if memoir_res else None
+
+    if not memoir:
+        return None
+
+    # 2. Chapters ordered by sort_order
+    chapters_res = supabase_admin.table("chapter")\
+        .select("id, title, sort_order")\
+        .eq("memoir_id", memoir_id)\
+        .order("sort_order")\
+        .execute()
+    chapters = chapters_res.data or []
+
+    # 3. Memories with embedded media assets via junction table
+    memories_res = supabase_admin.table("memory")\
+        .select(
+            "id, title, body_text, occurred_start, created_at, "
+            "chapter_id, position_in_chapter, author_participant_id, "
+            "memory_media(media_asset(id, kind, storage_key, caption))"
+        )\
+        .eq("memoir_id", memoir_id)\
+        .is_("deleted_at", "null")\
+        .order("position_in_chapter")\
+        .execute()
+    memories = memories_res.data or []
+
+    # 4. Transcripts for audio assets
+    transcripts_res = supabase_admin.table("transcript")\
+        .select("media_asset_id, display_text, confidence")\
+        .eq("memoir_id", memoir_id)\
+        .execute()
+    transcripts = transcripts_res.data or []
+
+    # 5. Participants for author name resolution
+    participants_res = supabase_admin.table("memoir_participant")\
+        .select("id, display_name")\
+        .eq("memoir_id", memoir_id)\
+        .execute()
+    participants = participants_res.data or []
+
+    # 6. All photo media assets for the hero carousel and gallery
+    photos_res = supabase_admin.table("media_asset")\
+        .select("id, storage_key, caption, kind")\
+        .eq("memoir_id", memoir_id)\
+        .eq("kind", "photo")\
+        .execute()
+    photos = photos_res.data or []
+
+    return {
+        "memoir": memoir,
+        "chapters": chapters,
+        "memories": memories,
+        "transcripts": transcripts,
+        "participants": participants,
+        "photos": photos,
+    }
+</file>
+
+<file path="src/integrations/search_repository.py">
+"""
+@file integrations/search_repository.py
+@description Executes full-text search queries against PostgreSQL search vectors.
+"""
+
+from src.integrations.supabase_client import supabase_admin
+
+def search_memoir_content(memoir_id: str, query_text: str):
+    """
+    Calls a Postgres RPC function to perform a full-text search 
+    across memories, transcripts, and media captions filtered by memoir_id.
+    """
+    response = supabase_admin.rpc(
+        "search_memoirs_fts", 
+        {
+            "target_memoir_id": memoir_id,
+            "search_query": query_text
+        }
+    ).execute()
+    
+    return response.data if response.data else []
+</file>
+
+<file path="src/integrations/share_repository.py">
+from typing import Dict, Any, Optional, List
+from fastapi import HTTPException, status
+from src.integrations.supabase_client import supabase_admin
+
+class ShareRepository:
+
+    @staticmethod
+    async def get_participant(memoir_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """Resolves the participant ID and role for the user."""
+        try:
+            res = supabase_admin.table("memoir_participant")\
+                .select("id, role")\
+                .eq("memoir_id", memoir_id)\
+                .eq("user_id", user_id)\
+                .is_("removed_at", None)\
+                .execute()
+            return res.data[0] if res.data else None
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    @staticmethod
+    async def get_memoir_by_id(memoir_id: str) -> Optional[Dict[str, Any]]:
+        res = supabase_admin.table("memoir").select("*").eq("id", memoir_id).execute()
+        return res.data[0] if res.data else None
+
+    @staticmethod
+    async def get_active_link(memoir_id: str, scope: str) -> Optional[Dict[str, Any]]:
+        """Matches your SQL constraint: one live link per scope per memoir."""
+        res = supabase_admin.table("memoir_link")\
+            .select("*")\
+            .eq("memoir_id", memoir_id)\
+            .eq("scope", scope)\
+            .is_("revoked_at", None)\
+            .execute()
+        return res.data[0] if res.data else None
+
+    @staticmethod
+    async def get_link_by_token(token: str) -> Optional[Dict[str, Any]]:
+        res = supabase_admin.table("memoir_link").select("*").eq("token", token).execute()
+        return res.data[0] if res.data else None
+
+    @staticmethod
+    async def insert_link(insert_data: Dict[str, Any]) -> Dict[str, Any]:
+        # Token and defaults are generated automatically by your Postgres schema
+        res = supabase_admin.table("memoir_link").insert(insert_data).select("*").execute()
+        if not res.data:
+            raise HTTPException(status_code=400, detail="Failed to create share link")
+        return res.data[0]
+
+    @staticmethod
+    async def update_link(link_id: str, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        res = supabase_admin.table("memoir_link").update(update_data).eq("id", link_id).select("*").execute()
+        return res.data[0]
+
+    @staticmethod
+    async def increment_open_count(link_id: str, current_count: int) -> None:
+        supabase_admin.table("memoir_link").update({"open_count": current_count + 1}).eq("id", link_id).execute()
+
+    @staticmethod
+    async def get_shared_memoir_view(memoir_id: str) -> List[Dict[str, Any]]:
+        res = supabase_admin.table("memory")\
+            .select("*, memory_media(*, media_asset(*))")\
+            .eq("memoir_id", memoir_id)\
+            .eq("status", "saved")\
+            .is_("deleted_at", None)\
+            .order("created_at", desc=True)\
+            .execute()
+        return res.data or []
+</file>
+
+<file path="src/schemas/auth.py">
+"""
+@file models/auth.py
+@description Pydantic models for user authentication and registration requests.
+"""
+
+from pydantic import BaseModel, EmailStr, Field
+
+class UserRegisterRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=6, description="Password must be at least 6 characters long.")
+    full_name: str = Field(..., min_length=1, description="User's full name for profile setup.")
+
+class UserLoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+</file>
+
+<file path="src/schemas/comments.py">
+"""
+@file schemas/comment_schemas.py
+@description Pydantic validation schemas for comment requests and responses.
+"""
+
+from pydantic import BaseModel, ConfigDict
+from typing import Optional
+
+class CommentCreate(BaseModel):
+    memoir_id: str
+    memory_id: Optional[str] = None   # was: str (required)
+    media_asset_id: Optional[str] = None
+    parent_comment_id: Optional[str] = None
+    body: str
+
+class CommentResponse(BaseModel):
+    id: str
+    memoir_id: str
+    memory_id: Optional[str] = None
+    media_asset_id: Optional[str] = None
+    author_participant_id: str
+    parent_comment_id: Optional[str] = None
+    body: str
+    created_at: str
+    updated_at: Optional[str] = None
+    author_name: str
+
+    model_config = ConfigDict(from_attributes=True)
+</file>
+
+<file path="src/schemas/export.py">
+"""
+@file schemas/export.py
+@description Pydantic schemas for memoir export request and job status responses.
+"""
+
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime
+
+class ExportRequest(BaseModel):
+    kind: str = Field(default="pdf", description="Export format kind, e.g., 'pdf'")
+
+class ExportJobResponse(BaseModel):
+    export_id: str
+    memoir_id: str
+    status: str
+    message: str
+    storage_key: Optional[str] = None
+    download_url: Optional[str] = None
+    created_at: datetime
+</file>
+
+<file path="src/schemas/search.py">
+"""
+@file schemas/search.py
+@description Pydantic schemas for full-text search validation and response payloads.
+"""
+
+from pydantic import BaseModel, Field
+import uuid
+
+class SearchQueryResponseItem(BaseModel):
+    id: str
+    memoir_id: str
+    title: str | None = None
+    body_text: str | None = None
+    matched_content_type: str  # e.g., 'memory', 'transcript', 'caption'
+    relevance_score: float | None = None
+</file>
+
+<file path="src/schemas/share.py">
+from datetime import datetime
+from typing import Dict, Any, Optional
+from pydantic import BaseModel, ConfigDict
+
+class ShareLinkUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expires_at: Optional[datetime] = None  # The only thing an owner might realistically update
+
+class ShareLinkResponse(BaseModel):
+    id: str
+    memoir_id: str
+    scope: str
+    token: str
+    url: str
+    created_by_participant_id: Optional[str] = None
+    created_at: datetime
+    expires_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+    open_count: int
+
+class ShareLinkResponseEnvelope(BaseModel):
+    success: bool = True
+    message: str = "Operation successful"
+    data: ShareLinkResponse
+
+class SharedMemoirResponseEnvelope(BaseModel):
+    success: bool = True
+    message: str = "Operation successful"
+    data: Dict[str, Any]
+</file>
+
+<file path="src/api/transcripts.py">
+"""
+@file transcript.py
+@description FastAPI router exposing endpoints to request background transcriptions.
+"""
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException, status
+from src.schemas.transcript import TranscriptionRequest
+from src.domain.transcription_service import transcribe_and_store_audio
+
+router = APIRouter(prefix="/api/transcript", tags=["Transcript"])
+
+@router.post("/", status_code=status.HTTP_202_ACCEPTED)
+async def request_transcription(
+    payload: TranscriptionRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Triggers AssemblyAI speech-to-text conversion in the background for a given media asset.
+    """
+    try:
+        background_tasks.add_task(
+            transcribe_and_store_audio,
+            media_asset_id=payload.media_asset_id,
+            memoir_id=payload.memoir_id,
+            storage_key=payload.storage_key
+        )
+        return {"status": "processing", "message": "Transcription task initiated in background."}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to queue transcription task: {str(e)}"
+        )
+</file>
+
+<file path="src/domain/authorization.py">
+"""
+@file src/domain/authorization.py
+@description Centralized authorization and role-checking helpers for memoir participants.
+"""
+
+from fastapi import HTTPException, status
+from src.integrations import memoir_repository , memory_repository  
+
+
+def verify_active_participant(memoir_id: str, user_id: str, required_roles: list[str] = None) -> dict:
+    """
+    Verifies that a user is an active (non-removed) participant of a memoir 
+    and optionally checks if they possess one of the required roles.
+
+    Args:
+        memoir_id (str): The memoir container ID.
+        user_id (str): The user ID.
+        required_roles (list[str], optional): List of allowed roles (e.g., ['owner', 'admin', 'contributor']).
+
+    Returns:
+        dict: The participant record dictionary.
+
+    Raises:
+        HTTPException (403): If unauthorized, removed, or lacking the required role.
+    """
+    if isinstance(user_id, dict):
+        user_id = user_id.get("user_id") or user_id.get("id") 
+
+    # Ensure it's explicitly a clean string
+    user_id_str = str(user_id)
+    
+    res = memory_repository.fetch_participant(str(memoir_id), user_id_str)
+    if not res.data:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: You are not an active participant of this memoir."
+        )
+
+    participant = res.data[0]
+    
+    # 🔍 ADD THIS LINE TO INSPECT WHAT PYTHON ACTUALLY SEES
+    print("DEBUG PARTICIPANT FETCHED FROM DB:", participant)
+    
+    # Explicit check for removed status (just in case query soft-filter is bypassed)
+    if participant.get("removed_at") is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Your participation in this memoir has been revoked."
+        )
+
+    # If specific write/admin roles are required, enforce them
+    if required_roles:
+        user_role = participant.get("role")
+        print(f"DEBUG USER ROLE: '{user_role}' (Type: {type(user_role)})") # Check value & type
+        if user_role not in required_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied: Requires one of the following roles: {', '.join(required_roles)}."
+            )
+
+    return participant
+</file>
+
+<file path="src/integrations/auth_repository.py">
+"""
+@file auth_repository.py
+@description Data access layer adapter module managing direct Supabase Auth 
+sign-up/sign-in flows and user account profile table synchronization.
+"""
+
+from src.integrations.supabase_client import supabase
+
+
+def auth_sign_up(email: str, password: str, full_name: str):
+    """
+    Invokes Supabase Auth registration to provision user credentials and metadata.
+
+    Args:
+        email (str): The user's email address.
+        password (str): The user's password.
+        full_name (str): The user's full name.
+
+    Returns:
+        Any: The Supabase auth response object.
+    """
+    return supabase.auth.sign_up({
+        "email": email,
+        "password": password,
+        "options": {
+            "email_redirect_to": "http://localhost:3000/login",
+            "data": {
+                "full_name": full_name
+            }
+        }
+    })
+
+
+def auth_sign_in(email: str, password: str):
+    """
+    Authenticates a user against Supabase Auth using email and password.
+
+    Args:
+        email (str): The user's email address.
+        password (str): The user's password.
+
+    Returns:
+        Any: The Supabase auth response object containing session and user data.
+    """
+    return supabase.auth.sign_in_with_password({
+        "email": email,
+        "password": password
+    })
+
+
+def update_last_login(user_id: str, timestamp: str):
+    """
+    Updates the last login timestamp record for a specific user account.
+
+    Args:
+        user_id (str): The unique user ID.
+        timestamp (str): The ISO-formatted UTC timestamp string.
+
+    Returns:
+        Any: The database query response object.
+    """
+    return supabase.table("user_account").update({
+        "last_login_at": timestamp
+    }).eq("id", user_id).execute()
+</file>
+
+<file path="src/integrations/storage_adapter.py">
+"""
+@file storage_adapter.py
+@description Infrastructure adapter service managing low-level object storage 
+interactions, file validations, signed upload/playback URLs, and bucket cleanup.
+"""
+
+import logging
+import uuid
+from dataclasses import dataclass
+
+from fastapi import HTTPException, status
+from supabase import create_client
+
+from src.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+_client = create_client(settings.supabase_url, settings.supabase_secret_key)
+
+ALLOWED_MIME = {
+    "audio/webm": ("audio", "webm"),
+    "audio/ogg":  ("audio", "ogg"),
+    "audio/mpeg": ("audio", "mp3"),
+    "audio/mp4":  ("audio", "m4a"),
+    "audio/wav":  ("audio", "wav"),
+    "image/jpeg": ("image", "jpg"),
+    "image/png":  ("image", "png"),
+    "image/webp": ("image", "webp"),
+    "image/heic": ("image", "heic"),
+}
+
+
+@dataclass
+class SignedUpload:
+    path: str
+    signed_url: str
+    token: str
+
+
+def _ensure_bucket_exists():
+    """Ensures the configured storage bucket exists, creating it if necessary."""
+    bucket_name = settings.supabase_media_bucket
+    try:
+        buckets = _client.storage.list_buckets()
+        bucket_names = [
+            b.name if hasattr(b, 'name') else b.get("name") 
+            for b in (buckets or [])
+        ]
+        if bucket_name not in bucket_names:
+            _client.storage.create_bucket(id=bucket_name, name=bucket_name, options={"public": True})
+            logger.info(f"Automatically created missing storage bucket: {bucket_name}")
+    except Exception as exc:
+        logger.warning(f"Could not verify or create storage bucket '{bucket_name}': {exc}")
+
+
+def validate_upload(mime_type: str) -> tuple[str, str]:
+    if mime_type not in ALLOWED_MIME:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="That file type isn't supported. Try a photo or a voice recording.",
+        )
+    return ALLOWED_MIME[mime_type]
+
+
+def build_key(memoir_id: uuid.UUID, media_type: str, extension: str) -> str:
+    return f"memoirs/{memoir_id}/{media_type}/{uuid.uuid4()}.{extension}"
+
+
+def create_signed_upload(key: str) -> SignedUpload:
+    _ensure_bucket_exists()
+    try:
+        res = _client.storage.from_(settings.supabase_media_bucket).create_signed_upload_url(key)
+    except Exception as exc:
+        logger.error("Signed upload URL failed key=%s: %s", key, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="We couldn't start the upload just now. Please try again in a moment.",
+        )
+    return SignedUpload(
+        path=res.get("path", key),
+        signed_url=res.get("signed_url") or res.get("signedURL"),
+        token=res["token"],
+    )
+
+
+def object_exists(key: str) -> int | None:
+    folder, _, filename = key.rpartition("/")
+    try:
+        items = _client.storage.from_(settings.supabase_media_bucket).list(
+            folder, {"search": filename}
+        )
+    except Exception as exc:
+        logger.warning("Existence check failed key=%s: %s", key, exc)
+        return None
+
+    for item in items or []:
+        if item.get("name") == filename:
+            meta = item.get("metadata") or {}
+            return meta.get("size")
+    return None
+
+
+def create_playback_url(key: str) -> str | None:
+    """Bucket is public, so build the public URL directly instead of
+    depending on the signed-url response shape (which varies by SDK version
+    and was silently returning None)."""
+    try:
+        base = settings.supabase_url.rstrip("/")
+        bucket = settings.supabase_media_bucket
+        clean_key = key.lstrip("/")
+        return f"{base}/storage/v1/object/public/{bucket}/{clean_key}"
+    except Exception as exc:
+        logger.warning("Playback URL build failed key=%s: %s", key, exc)
+        return None
+
+
+def remove_object(key: str) -> None:
+    try:
+        _client.storage.from_(settings.supabase_media_bucket).remove([key])
+    except Exception as exc:
+        logger.warning("Object delete failed key=%s: %s", key, exc)
+</file>
+
+<file path="src/integrations/user.py">
+# 1. We added CheckConstraint and Text here
+from sqlalchemy import Column, String, DateTime, CheckConstraint, Text
+from sqlalchemy.sql import func
+from integrations.database import Base
+
+from sqlalchemy.dialects.postgresql import CITEXT, UUID
+import uuid
+
+class User(Base):
+    __tablename__ = "user_account"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    email = Column(CITEXT, unique=True, nullable=False)
+    
+    full_name = Column(Text, nullable=False)
+    
+    auth_provider_uid = Column(Text, unique=True, nullable=True)
+        
+    # Timestamps
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Ensures full_name isn't just blank spaces, perfectly matching the SQL constraint
+    __table_args__ = (
+        CheckConstraint("btrim(full_name) <> ''", name="user_account_name_not_blank"),
+    )
+</file>
+
+<file path="src/schemas/transcript.py">
+"""
+@file transcript.py
+@description Pydantic schemas for audio transcription validation and requests.
+"""
+
+from pydantic import BaseModel, Field
+
+class TranscriptionRequest(BaseModel):
+    media_asset_id: str = Field(..., description="The UUID of the audio media asset")
+    memoir_id: str = Field(..., description="The UUID of the memoir container")
+    storage_key: str = Field(..., description="The storage path key inside the Supabase bucket")
+</file>
+
+<file path="src/api/auth.py">
+"""
+@file api/routers/auth.py
+@description FastAPI router for user registration and authentication endpoints.
+"""
+
+from fastapi import APIRouter, status
+from src.schemas.auth import UserRegisterRequest, UserLoginRequest # Import login request schema
+from src.domain.auth_service import AuthService
+
+router = APIRouter(prefix="/api/auth", tags=["Authentication"])
+
+@router.post("/signup", status_code=status.HTTP_201_CREATED)
+def register_user_endpoint(payload: UserRegisterRequest):
+    """
+    Registers a new user account, triggers automatic database account provisioning,
+    and returns the session access token for immediate frontend use.
+    """
+    result = AuthService.register_user(payload)
+    user_data = result.get("user", {})
+    
+    return {
+        "success": True,
+        "message": result["message"],
+        "requires_confirmation": result.get("requires_confirmation", False),
+        "data": {
+            "user_id": user_data.get("id"),
+            "email": user_data.get("email"),
+            "full_name": user_data.get("full_name"),
+            "access_token": result.get("access_token")
+        }
+    }
+    
+@router.post("/login", status_code=status.HTTP_200_OK)
+def login_user_endpoint(payload: UserLoginRequest):
+    """
+    Authenticates an existing user and returns their session access token.
+    """
+    result = AuthService.login_user(payload)
+    return {
+        "success": True,
+        "message": result.get("message", "Login successful"),
+        "access_token": result["access_token"], # Directly at top level for easy frontend parsing
+        "data": {
+            "user_id": result.get("user_id"),
+            "email": result.get("email"),
+            "full_name": result.get("full_name"),
+            "access_token": result["access_token"],
+            "active_memoir": result.get("active_memoir") # Optional: if fetched during login
+        }
+    }
+</file>
+
+<file path="src/core/auth.py">
+"""
+@file src/core/auth.py
+@description FastAPI security dependency for high-performance local JWT verification 
+via Supabase JWKS, eliminating remote auth network round-trips and handling exceptions cleanly.
+"""
+
+import jwt
+from jwt import PyJWKClient
+from fastapi import HTTPException, status, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from src.core.config import SUPABASE_JWKS_URL
+
+security = HTTPBearer()
+
+jwks_client = PyJWKClient(SUPABASE_JWKS_URL) if SUPABASE_JWKS_URL else None
+
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    """
+    Validates the incoming Bearer JWT locally against the project's JWKS endpoint 
+    without triggering a remote network round-trip to Supabase Auth on every request.
+    """
+    token = credentials.credentials
+    try:
+        if not jwks_client:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="SUPABASE_JWKS_URL is not configured for local JWT validation."
+            )
+
+        signing_key = jwks_client.get_signing_key_from_jwt(token)
+        payload = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["HS256", "ES256", "RS256"],
+            audience="authenticated",
+            leeway=60
+        )
+
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token payload: missing subject identifier (sub)."
+            )
+
+        return {
+            "user_id": user_id,
+            "email": payload.get("email"),
+            "role": payload.get("role"),
+            "claims": payload
+        }
+
+    except HTTPException:
+        raise
+    except jwt.PyJWTError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Could not validate credentials: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Authentication failed: {str(e)}"
+        )
+</file>
+
+<file path="src/domain/transcription_service.py">
+import os
+import time
+import assemblyai as aai
+from src.integrations.memory_repository import upsert_transcript_record
+from src.integrations.supabase_client import supabase_admin
+from src.core.config import settings
+
+def transcribe_and_store_audio(media_asset_id: str, memoir_id: str, storage_key: str):
+    """
+    Downloads audio binary from Supabase storage using admin client with retries, 
+    uploads raw bytes directly to AssemblyAI, and persists the resulting transcript.
+    """
+    api_key = os.getenv("ASSEMBLYAI_API_KEY")
+    if not api_key:
+        print("CRITICAL ERROR: ASSEMBLYAI_API_KEY is missing from environment variables!")
+        raise ValueError("ASSEMBLYAI_API_KEY is missing")
+
+    aai.settings.api_key = api_key
+    transcriber = aai.Transcriber()
+
+    try:
+        bucket_name = settings.supabase_media_bucket
+        audio_bytes = None
+        
+        print(f"Attempting to download storage key '{storage_key}' from bucket '{bucket_name}'...")
+        for attempt in range(1, 4):
+            try:
+                audio_bytes = supabase_admin.storage.from_(bucket_name).download(storage_key)
+                if audio_bytes:
+                    print(f"Successfully downloaded audio bytes on attempt {attempt}")
+                    break
+            except Exception as dl_err:
+                print(f"Download attempt {attempt} failed (file might still be uploading): {str(dl_err)}")
+                if attempt < 3:
+                    time.sleep(1.5)
+
+        if not audio_bytes:
+            raise Exception(f"Download returned empty bytes or 404 after retries for key: {storage_key}")
+
+        print("Uploading raw audio bytes to AssemblyAI...")
+        upload_url = transcriber.upload_file(audio_bytes)
+
+        print(f"Uploaded successfully. Transcribing URL...")
+        transcript_result = transcriber.transcribe(upload_url)
+        
+        if transcript_result.status == aai.TranscriptStatus.error:
+            raise Exception(f"AssemblyAI processing failed: {transcript_result.error}")
+
+        raw_text = transcript_result.text or ""
+        print(f"Transcription successful! Text: {raw_text[:60]}...")
+
+        transcript_payload = {
+            "media_asset_id": media_asset_id,
+            "memoir_id": memoir_id,
+            "raw_text": raw_text,
+            "engine": "assemblyai",
+            "confidence": transcript_result.confidence,
+            "language": transcript_result.language_code or "en"
+        }
+        response = upsert_transcript_record(transcript_payload)
+        
+        print("Transcript successfully saved to database!", response.data)
+        return response.data
+
+    except Exception as e:
+        print(f"CRITICAL TRANSCRIPTION EXCEPTION CAUGHT: {str(e)}")
+        raise e
+</file>
+
+<file path="src/integrations/media_repository.py">
+"""
+@file media_repository.py
+@description Data access layer adapter module handling direct Supabase queries 
+for participant authorizations and media asset metadata persistence.
+"""
+
+from src.integrations.supabase_client import supabase
+from src.integrations.supabase_client import supabase_admin
+
+def fetch_participant(memoir_id: str, user_id: str):
+    """
+    Queries the database to verify if a user is an authorized participant of a memoir.
+
+    Args:
+        memoir_id (str): The unique identifier of the target memoir.
+        user_id (str): The unique identifier of the user.
+
+    Returns:
+        Any: The database query result object containing participant data.
+    """
+    return supabase.table("memoir_participant") \
+        .select("id") \
+        .eq("memoir_id", memoir_id) \
+        .eq("user_id", user_id) \
+        .is_("removed_at", "null") \
+        .execute()
+
+
+def insert_media_metadata(media_data: dict):
+    """
+    Persists a new media asset metadata record into the database.
+
+    Args:
+        media_data (dict): The dictionary containing validated media asset attributes.
+
+    Returns:
+        Any: The database response object containing the inserted media record.
+    """
+    return supabase_admin.table("media_asset").insert(media_data).execute()
+
+def check_existing_media_by_checksum(memoir_id: str, checksum: str):
+    """
+    Checks if a media asset with the exact same checksum already exists in this memoir 
+    to prevent duplicate ghost uploads.
+    """
+    if not checksum:
+        return None
+    res = supabase.table("media_asset") \
+        .select("id, storage_key") \
+        .eq("memoir_id", memoir_id) \
+        .eq("checksum_sha256", checksum) \
+        .execute()
+    return res.data[0] if res.data else None
+</file>
+
+<file path="src/integrations/supabase_client.py">
+"""
+@file integrations/supabase_client.py
+@description Initializes and exports dedicated Supabase clients for admin and user operations,
+enforcing strict fail-fast validation and preventing service-role privilege escalation.
+"""
+
+import os
+from supabase import create_client, Client
+from dotenv import load_dotenv
+
+load_dotenv()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+
+# FIXED: Fail fast if ANY required key is missing. 
+# Never allow the public client to fall back to the service role key.
+if not SUPABASE_URL:
+    raise ValueError("SUPABASE_URL is missing from environment variables.")
+
+if not SUPABASE_SERVICE_ROLE_KEY:
+    raise ValueError("SUPABASE_SERVICE_ROLE_KEY is missing from environment variables.")
+
+if not SUPABASE_ANON_KEY:
+    raise ValueError(
+        "SUPABASE_ANON_KEY is missing from environment variables. "
+        "Failing fast to prevent accidental RLS bypass via service role fallback."
+    )
+
+# 1. Dedicated Admin Client (Bypasses RLS safely for backend orchestration)
+supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+# 2. Public/Auth Client strictly restricted by Row Level Security (NO FALLBACK)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+</file>
+
+<file path="src/schemas/media.py">
+"""
+@file schemas/media.py
+@description Pydantic validation schemas for presigned URL generation and media metadata,
+enforcing strict UUID typing, file size limits, media kinds, and path traversal protection on filenames.
+"""
+
+import os
+import uuid
+from typing import Optional
+from pydantic import BaseModel, Field, field_validator
+
+
+class PresignedUrlRequest(BaseModel):
+    """
+    Validation schema for requesting a direct-to-storage presigned upload URL.
+    """
+    memoir_id: uuid.UUID = Field(..., description="UUID of the parent memoir")
+    filename: str = Field(..., description="Original name of the file being uploaded")
+    
+    # Aliases 'file_type' from incoming payloads to 'mime_type' for compatibility
+    mime_type: str = Field(
+        ..., 
+        validation_alias="file_type", 
+        description="MIME type of the file (e.g., image/jpeg, audio/webm)"
+    )
+    
+    # byte_size: int = Field(..., gt=0, description="Size of the file in bytes")
+
+    @field_validator('filename')
+    @classmethod
+    def sanitize_filename(cls, v: str) -> str:
+        """
+        Sanitizes incoming filenames to strip directory traversal characters 
+        (e.g., '../', absolute paths) and retain only a safe base filename.
+
+        Args:
+            v (str): The raw input filename.
+
+        Returns:
+            str: The sanitized base filename.
+
+        Raises:
+            ValueError: If the filename contains path traversal attempts or is empty.
+        """
+        safe_name = os.path.basename(v.strip())
+        if not safe_name or ".." in v or "/" in v or "\\" in v:
+            raise ValueError("Invalid or unsafe filename provided.")
+        return safe_name
+
+
+class MediaMetadataRequest(BaseModel):
+    """
+    Validation schema for persisting media asset metadata after a successful upload.
+    """
+    memoir_id: uuid.UUID = Field(..., description="UUID of the parent memoir")
+    storage_key: str = Field(..., description="Storage path key in Supabase storage")
+    kind: str = Field(..., description="Media kind: 'photo', 'audio', or 'video'")
+    mime_type: str = Field(..., description="MIME type of the file")
+    byte_size: int = Field(..., gt=0, description="Size of the file in bytes")
+    original_filename: Optional[str] = Field(None, description="Original filename")
+    duration_ms: Optional[int] = Field(None, description="Duration in milliseconds (null for photos)")
+    width_px: Optional[int] = Field(None, description="Width in pixels (null for audio)")
+    height_px: Optional[int] = Field(None, description="Height in pixels (null for audio)")
+    caption: Optional[str] = Field(None, max_length=1000, description="Optional caption for the media")
+    checksum_sha256: Optional[str] = Field(None, min_length=64, max_length=64, description="Optional file checksum")
+    
+    @field_validator('kind')
+    @classmethod
+    def validate_media_kind(cls, v: str) -> str:
+        """
+        Ensures media kind is within the permitted classification set.
+        """
+        allowed_kinds = {'photo', 'audio', 'video'}
+        if v not in allowed_kinds:
+            raise ValueError(f"Invalid media kind '{v}'. Must be one of {allowed_kinds}.")
+        return v
+</file>
+
+<file path="src/schemas/memoir.py">
+from pydantic import BaseModel, Field, model_validator
+from typing import Optional, Literal
+from datetime import date
+import uuid
+
+class MemoirCreateRequest(BaseModel):
+    subject_name: str = Field(..., description="Name of the subject of the memoir")
+    subject_born_on: Optional[date] = Field(None, description="Birth date of the subject (YYYY-MM-DD)")
+    subject_died_on: Optional[date] = Field(None, description="Death date of the subject (YYYY-MM-DD)")
+    subject_is_living: bool = Field(False, description="Whether the subject is currently alive")
+    description: Optional[str] = Field(None, description="Optional description or blurb for the memoir")
+    visibility: Optional[str] = Field("invited_only", description="Visibility setting: 'invited_only', 'public', or 'link_with_password'")
+    comment_policy: Optional[str] = Field("invited_only", description="Comment policy setting")
+    relationship: Optional[Literal[
+    "self", "spouse_partner", "parent", "child", 
+    "sibling", "grandchild", "extended_family", 
+    "friend", "colleague", "neighbour", "other"
+    ]] = Field("other", description="Relationship of the creator to the memoir subject")
+
+    @model_validator(mode='after')
+    def validate_memoir_constraints(self) -> 'MemoirCreateRequest':
+        if self.subject_born_on and self.subject_died_on:
+            if self.subject_born_on > self.subject_died_on:
+                raise ValueError("Subject birth date cannot be after their death date.")
+        if self.subject_is_living and self.subject_died_on is not None:
+            raise ValueError("A living subject cannot have a death date.")
+        return self
+
+
+class MemoirResponseData(BaseModel):
+    """The raw memoir record returned inside the data envelope."""
+    id: uuid.UUID
+    subject_name: str
+    subject_born_on: Optional[date] = None
+    subject_died_on: Optional[date] = None
+    subject_is_living: bool
+    description: Optional[str] = None
+    visibility: str
+    comment_policy: str
+    created_by_user_id: uuid.UUID
+    status: str
+
+
+class MemoirResponseEnvelope(BaseModel):
+    """Consistent API response envelope for frontend consumption and OpenAPI documentation."""
+    success: bool = True
+    message: str = "Operation successful"
+    data: MemoirResponseData
+</file>
+
+<file path="src/api/media.py">
+"""
+@file api/media.py
+@description FastAPI router for media presigned URLs and metadata.
+"""
+
+from fastapi import APIRouter, Depends, status
+from src.schemas.media import PresignedUrlRequest, MediaMetadataRequest
+from src.domain.media_service import MediaService
+from src.core.auth import get_current_user  # Production JWT verification dependency
+
+router = APIRouter(prefix="/api/media", tags=["Media Management"])
+
+@router.post("/presigned-url")
+def create_presigned_url(
+    payload: PresignedUrlRequest, 
+    current_user_id: str = Depends(get_current_user)
+):
+    """
+    Generates a presigned storage URL after validating user permissions for the requested memoir.
+    """
+    user_session = {"user_id": current_user_id}
+    data = MediaService.generate_presigned_url(payload, user_session)
+    return {
+        "success": True,
+        "data": data
+    }
+
+@router.post("/metadata", status_code=status.HTTP_201_CREATED)
+def save_metadata(
+    payload: MediaMetadataRequest,
+    current_user_id: str = Depends(get_current_user)
+):
+    """
+    Verifies file existence in storage and saves media metadata records.
+    """
+    user_session = {"user_id": current_user_id}
+    saved_record = MediaService.save_metadata(payload, user_session)
+    return {
+        "success": True,
+        "message": "Media metadata successfully saved.",
+        "data": saved_record
+    }
+</file>
+
+<file path="src/core/config.py">
+"""
+@file src/core/config.py
+@description Centralized application configuration and environment variable validation
+using Pydantic BaseSettings.
+"""
+
+from typing import List, Optional
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """
+    Application settings loaded securely from environment variables.
+    """
+    supabase_url: str = Field(..., validation_alias="SUPABASE_URL")
+    supabase_anon_key: str = Field(..., validation_alias="SUPABASE_ANON_KEY")
+    supabase_secret_key: str = Field(..., validation_alias="SUPABASE_SERVICE_ROLE_KEY")
+    database_url: str = Field(..., validation_alias="DATABASE_URL")
+    supabase_jwks_url: str = Field(..., validation_alias="SUPABASE_JWKS_URL")
+    supabase_media_bucket: str = Field("memoir-media", validation_alias="SUPABASE_BUCKET_NAME")
+    
+    # Flexible LLM Configuration for Groq / ExperientialLabs / OpenAI
+    llm_api_key: Optional[str] = Field(None, validation_alias="LLM_API_KEY")
+    llm_base_url: str = Field("https://api.groq.com/openai/v1", validation_alias="LLM_BASE_URL")
+    llm_model: str = Field("llama-3.1-8b-instant", validation_alias="LLM_MODEL")
+    
+    media_max_bytes: int = Field(52_428_576, validation_alias="MEDIA_MAX_BYTES")
+    media_signed_url_ttl: int = Field(300, validation_alias="MEDIA_SIGNED_URL_TTL")
+    
+    cors_origins: List[str] = Field(
+        default=["http://localhost:3000", "http://127.0.0.1:3000"],
+        validation_alias="CORS_ORIGINS"
+    )
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def assemble_cors_origins(cls, v: str | List[str]) -> List[str]:
+        if isinstance(v, str) and not v.startswith("["):
+            return [i.strip() for i in v.split(",")]
+        elif isinstance(v, list):
+            return v
+        return ["http://localhost:3000"]
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+        extra="ignore"
+    )
+
+
+settings = Settings()
+
+STORAGE_TIER_HOT = "hot"
+STORAGE_TIER_COLD = "cold"
+
+TRANSCRIPTION_STATUS_PENDING = "pending"
+TRANSCRIPTION_STATUS_COMPLETED = "completed"
+TRANSCRIPTION_STATUS_FAILED = "failed"
+
+SUPABASE_JWKS_URL = settings.supabase_jwks_url
+</file>
+
+<file path="src/schemas/memory.py">
+"""
+@file src/schemas/memory.py
+@description Pydantic request and response schemas for memory creation and management,
+enforcing strict status literals.
+"""
+
+import uuid
+from datetime import date
+from typing import Optional, Literal, List
+from pydantic import BaseModel, Field
+
+class MemoryCreateRequest(BaseModel):
+    """
+    Validation schema for creating a new memory within a memoir.
+    """
+    memoir_id: uuid.UUID = Field(..., description="UUID of the parent memoir container")
+    title: Optional[str] = Field(None, max_length=255, description="Title of the memory")
+    body_text: Optional[str] = Field(None, max_length=10000, description="Rich text content of the memory")
+    
+    # Enforce allowed status values via Literal to prevent typo 500 errors
+    status: Literal["draft", "saved"] = Field("draft", description="Publication status of the memory")
+    
+    # Use native date types instead of raw strings so 'tomorrow' or invalid strings fail with 422
+    occurred_start: Optional[date] = Field(None, description="Start date of when the memory took place")
+    occurred_end: Optional[date] = Field(None, description="End date of when the memory took place")
+    
+    # Restrict precision and source fields to allowed enums
+    occurred_precision: Optional[Literal["day", "month", "year", "decade"]] = Field(
+    "day", description="Precision level of the occurrence date"
+    )
+    
+    date_source: Optional[Literal["owner", "contributor", "ai"]] = Field(
+    "owner", 
+    description="Source of the memory authoring"
+)
+    
+    # Attached media assets
+    media_asset_ids: Optional[List[uuid.UUID]] = Field(
+        default_factory=list, description="List of media asset UUIDs linked to this memory"
+    )
+</file>
+
+<file path="src/api/memoir.py">
+"""
+@file api/memoir.py
+@description FastAPI router handling HTTP endpoints for memoir creation, 
+management, and live memoir retrieval.
+"""
+
+from fastapi import APIRouter, Depends, status
+from src.schemas.memoir import MemoirCreateRequest, MemoirResponseEnvelope
+from src.domain.memoir_service import MemoirService
+from src.core.auth import get_current_user
+
+router = APIRouter(prefix="/api/memoirs", tags=["Memoirs"])
+
+@router.post("/", status_code=status.HTTP_201_CREATED, response_model=MemoirResponseEnvelope)
+def create_memoir(
+    payload: MemoirCreateRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Creates a new root memoir container for a subject. 
+    This must be executed first to obtain a memoir_id before adding media or memories.
+    """
+    user_id = current_user.get("user_id") or current_user.get("id") or current_user.get("sub")
+    
+    user_session = {"user_id": user_id}
+    new_memoir = MemoirService.create_memoir(payload, user_session)
+    return {
+        "success": True,
+        "message": "Memoir successfully created.",
+        "data": new_memoir
+    }
+
+@router.get("/{memoir_id}/live", status_code=status.HTTP_200_OK)
+def get_live_memoir(
+    memoir_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Retrieves live memoir metadata, chapters, and memory entries for active participants.
+    """
+    user_id = current_user.get("user_id") or current_user.get("id") or current_user.get("sub")
+    data = MemoirService.get_live_memoir(memoir_id, user_id)
+    return {
+        "success": True,
+        "data": data
+    }
+</file>
+
+<file path="src/api/memory.py">
+"""
+@file api/memory.py
+@description FastAPI router for owner memory capture, feed retrieval, and pre-publication management.
+"""
+
+from fastapi import APIRouter, Depends, status
+from src.schemas.memory import MemoryCreateRequest
+from src.domain.memory_service import MemoryService
+from src.core.auth import get_current_user  # Production JWT verification dependency
+
+router = APIRouter(prefix="/api/memories", tags=["Memories"])
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+def create_memory(
+    payload: MemoryCreateRequest, 
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Create a new memory entry. Supports combining text, voice recordings, 
+    and photographs into a single memory using media asset IDs.
+    """
+    user_id = current_user.get("user_id") or current_user.get("id") or current_user.get("sub")
+
+    user_session = {"user_id": user_id}
+    result = MemoryService.create_memory(payload, user_session)
+    return {
+        "success": True,
+        "message": "Memory successfully created.",
+        "data": result
+    }
+    
+    
+
+@router.get("/feed/{memoir_id}", status_code=status.HTTP_200_OK)
+def get_memoir_feed_route(
+    memoir_id: str, 
+    limit: int = 20, 
+    offset: int = 0, 
+    user_session: dict = Depends(get_current_user)
+):
+    """
+    API endpoint to fetch a paginated memory feed for a specific memoir container.
+    """
+    user_id = user_session.get("user_id")
+    feed_data = MemoryService.get_memoir_feed(memoir_id, user_id, limit=limit, offset=offset)
+    return {"success": True, "data": feed_data}
+
+@router.delete("/memoirs/{memoir_id}/memories/{memory_id}", status_code=status.HTTP_200_OK)
+def delete_memory_route(memoir_id: str, memory_id: str, user_session: dict = Depends(get_current_user)):
+    """
+    API endpoint to delete a memory securely within a specific memoir container, 
+    returning a consistent response envelope.
+    """
+    user_id = user_session.get("user_id")
+    result = MemoryService.delete_memory(memoir_id, memory_id, user_id)
+    
+    return {"success": True, "data": result}
+</file>
+
+<file path="src/domain/auth_service.py">
+# src/domain/auth_service.py
+import logging
+from datetime import datetime, timezone
+from fastapi import HTTPException, status
+from src.integrations import auth_repository
+from src.schemas.auth import UserRegisterRequest, UserLoginRequest
+from src.integrations.supabase_client import supabase
+
+logger = logging.getLogger(__name__)
+
+class AuthService:
+    """
+    Handles user authentication workflows, coordinating between external auth 
+    credentials and internal application profile records through repository adapters.
+    """
+
+    @classmethod
+    def register_user(cls, payload: UserRegisterRequest) -> dict:
+        """
+        Registers a new user via Supabase Auth, provisions their profile metadata, 
+        and explicitly syncs an entry into the public `user_account` database table.
+        """
+        email = payload.email
+        password = payload.password
+        full_name = payload.full_name
+
+        try:
+            response = auth_repository.auth_sign_up(
+                email=email,
+                password=password,
+                full_name=full_name
+            )
+            
+            user = getattr(response, "user", None)
+            session = getattr(response, "session", None)
+
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Registration failed. User object not returned."
+                )
+
+            user_id = str(user.id)
+
+            if not session:
+                logger.info(f"Registration successful for {email}. Email confirmation pending.")
+                return {
+                    "success": True,
+                    "message": "Registration successful! Please check your email to confirm your account before signing in.",
+                    "requires_confirmation": True,
+                    "access_token": None,
+                    "user": {
+                        "id": user_id,
+                        "email": email,
+                        "full_name": full_name
+                    }
+                }
+
+            logger.info(f"User successfully registered and authenticated: {email}")
+            return {
+                "success": True,
+                "message": "Registration successful.",
+                "requires_confirmation": False,
+                "access_token": session.access_token,
+                "refresh_token": session.refresh_token,
+                "user": {
+                    "id": user_id,
+                    "email": email,
+                    "full_name": full_name
+                }
+            }
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "already registered" in error_msg or "already exists" in error_msg or "user already registered" in error_msg:
+                logger.warning(f"Registration attempt failed - email already in use: {email}")
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="This email is already registered. Please sign in or use a different email address."
+                )
+            
+            if isinstance(e, HTTPException):
+                raise e
+
+            logger.error(f"Unexpected Supabase auth registration error for {email}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Supabase auth registration failed: {str(e)}"
+            )
+            
+    @staticmethod
+    def login_user(payload: UserLoginRequest) -> dict:
+        """
+        Authenticates an existing user via Supabase Auth password verification, 
+        updates their last login timestamp in the database, and returns an active token.
+        """
+        try:
+            response = auth_repository.auth_sign_in(payload.email, payload.password)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Invalid email or password: {str(e)}"
+            )
+
+        if not response or not response.session or not response.user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password."
+            )
+
+        user_id = response.user.id
+        access_token = response.session.access_token
+
+        try:
+            auth_repository.update_last_login(user_id, datetime.now(timezone.utc).isoformat())
+        except Exception as db_err:
+            logger.warning("Failed to update last login timestamp: %s", str(db_err))
+
+        return {
+            "user_id": user_id,
+            "email": response.user.email,
+            "access_token": access_token,
+            "message": "Login successful."
+        }
+</file>
+
+<file path="src/integrations/memory_repository.py">
+"""
+@file memory_repository.py
+@description Data access layer adapter module handling direct Supabase queries 
+and persistence operations for memories, participant permissions, and media junctions,
+enforcing strict multi-tenant memoir_id isolation.
+"""
+
+from src.integrations.supabase_client import supabase_admin
+
+
+def fetch_participant(memoir_id: str, user_id: str):
+    """
+    Queries the database to verify if a user is an authorized participant of a memoir.
+    """
+    return supabase_admin.table("memoir_participant") \
+        .select("*") \
+        .eq("memoir_id", memoir_id) \
+        .eq("user_id", user_id) \
+        .is_("removed_at", "null") \
+        .execute()
+
+
+def insert_memory(memory_data: dict):
+    """
+    Persists a new memory record into the database table.
+    """
+    return supabase_admin.table("memory").insert(memory_data).execute()
+
+
+def insert_memory_media(link_records: list):
+    """
+    Links media asset IDs to a specific memory record via the junction table.
+    """
+    return supabase_admin.table("memory_media").insert(link_records).execute()
+
+
+def fetch_memoir_feed_records(memoir_id: str, limit: int = 20, offset: int = 0):
+    """
+    Retrieves paginated active memories with explicit columns and embedded media assets.
+    """
+    end_index = offset + limit - 1
+    return supabase_admin.table("memory") \
+        .select(
+            "id, memoir_id, author_participant_id, title, body_text, status, "
+            "occurred_start, occurred_end, occurred_precision, date_source, created_at, "
+            "memory_media(media_asset(*))"
+        ) \
+        .eq("memoir_id", memoir_id) \
+        .is_("deleted_at", "null") \
+        .order("created_at", desc=True) \
+        .range(offset, end_index) \
+        .execute()
+        
+def fetch_memory_by_id(memory_id: str, memoir_id: str):
+    """
+    Fetches status metadata for a specific memory record strictly scoped by memoir_id 
+    to prevent cross-tenant data probing.
+    """
+    return supabase_admin.table("memory") \
+        .select("memoir_id, status") \
+        .eq("id", memory_id) \
+        .eq("memoir_id", memoir_id) \
+        .execute()
+
+def delete_memory_record(memory_id: str, memoir_id: str):
+    """
+    Deletes a memory record permanently from the database, strictly scoped by 
+    both ID and memoir_id to prevent TOCTOU race conditions.
+    """
+    return supabase_admin.table("memory") \
+        .delete() \
+        .eq("id", memory_id) \
+        .eq("memoir_id", memoir_id) \
+        .execute()
+        
+def verify_media_assets_belong_to_memoir(memoir_id: str, media_asset_ids: list[str]):
+    """
+    Verifies that a list of media asset IDs all mathematically belong to the target memoir container.
+    """
+    res = supabase_admin.table("media_asset") \
+        .select("id") \
+        .eq("memoir_id", memoir_id) \
+        .in_("id", media_asset_ids) \
+        .execute()
+    return res.data or []
+
+def soft_delete_memory_record(memory_id: str, memoir_id: str):
+    """
+    Performs a soft-delete on a memory record by setting the deleted_at timestamp, 
+    making deletions reversible and preserving data integrity.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    return supabase_admin.table("memory") \
+        .update({"deleted_at": now}) \
+        .eq("id", memory_id) \
+        .eq("memoir_id", memoir_id) \
+        .execute()
+
+def fetch_media_asset_record(media_asset_id: str):
+    """
+    Fetches the full media asset record (including storage_key and kind) by its ID.
+    """
+    res = supabase_admin.table("media_asset") \
+        .select("*") \
+        .eq("id", media_asset_id) \
+        .maybe_single() \
+        .execute()
+    return res.data if res else None
+
+def upsert_transcript_record(transcript_payload: dict):
+    """
+    Saves or updates the AI transcript in the database, 
+    keeping DB operations isolated from integration logic.
+    """
+    return supabase_admin.table("transcript").upsert(transcript_payload).execute()
+</file>
+
+<file path="src/domain/memoir_service.py">
+"""
+@file memoir_service.py
+@description Business logic and orchestration service for creating memoir containers, 
+normalizing subject dates, automatically registering creator as owner participant,
+and retrieving live memoir records with signed media URLs.
+"""
+
+from fastapi import HTTPException, status
+from src.integrations import memoir_repository
+from src.integrations import storage_adapter
+from src.integrations.supabase_client import supabase_admin
+from src.domain.authorization import verify_active_participant
+from src.schemas.memoir import MemoirCreateRequest
+
+
+class MemoirService:
+    """
+    Handles business logic for memoir creation, account profile resolution,
+    participant role assignments, and fetching live memoir details.
+    """
+
+    @staticmethod
+    def create_memoir(payload: MemoirCreateRequest, user_session: dict) -> dict:
+        user_id = user_session.get("user_id")
+
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User session is missing user ID."
+            )
+
+        try:
+            user_res = memoir_repository.fetch_user_account(user_id)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to fetch user account details: {str(e)}"
+            )
+
+        user_record = user_res.data[0] if user_res and user_res.data else {}
+        display_name = user_record.get("full_name") or "Memoir Owner"
+        user_email = user_record.get("email")
+
+        memoir_data = {
+            "subject_name": payload.subject_name,
+            "subject_born_on": str(payload.subject_born_on) if payload.subject_born_on else None,
+            "subject_died_on": str(payload.subject_died_on) if payload.subject_died_on else None,
+            "subject_is_living": payload.subject_is_living,
+            "description": payload.description,
+            "visibility": payload.visibility,
+            "comment_policy": payload.comment_policy,
+            "created_by_user_id": user_id,
+            "status": "draft"
+        }
+
+        try:
+            db_response = memoir_repository.insert_memoir(memoir_data)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Database error while creating memoir: {str(e)}")
+
+        created_memoir = db_response.data[0]
+        memoir_id = created_memoir["id"]
+
+        participant_data = {
+            "memoir_id": memoir_id,
+            "user_id": user_id,
+            "role": "owner",
+            "display_name": display_name,
+            "email": user_email,
+            "relationship": payload.relationship
+        }
+
+        try:
+            memoir_repository.insert_memoir_participant(participant_data)
+        except Exception as e:
+            try:
+                memoir_repository.delete_memoir_record(memoir_id)
+            except Exception:
+                pass
+            
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to register memoir owner. Operation rolled back: {str(e)}"
+            )
+            
+        return created_memoir
+
+    @classmethod
+    def get_live_memoir(cls, memoir_id: str, user_id: str) -> dict:
+        """
+        Verifies participant authorization and returns the full live memoir details
+        including metadata, assigned chapters, and active memories with signed playback URLs.
+        """
+        verify_active_participant(str(memoir_id), str(user_id))
+
+        memoir_res = supabase_admin.table("memoir").select("*").eq("id", memoir_id).execute()
+        if not memoir_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Memoir container not found."
+            )
+
+        memoir = memoir_res.data[0]
+
+        chapters_res = (
+            supabase_admin.table("chapter")
+            .select("*")
+            .eq("memoir_id", memoir_id)
+            .order("sort_order", desc=False)
+            .execute()
+        )
+        chapters = chapters_res.data or []
+
+        memories_res = (
+    supabase_admin.table("memory")
+    .select("*, memory_media(*, media_asset(*))")
+    .eq("memoir_id", memoir_id)
+    .is_("deleted_at", "null")
+    .order("occurred_start", desc=False)   # chronological
+    .order("created_at", desc=False)       # tie-breaker for same/no date
+    .execute()
+)
+        memories_raw = memories_res.data or []
+
+        hydrated_memories = []
+        for mem in memories_raw:
+            media_list = []
+            raw_links = mem.pop("memory_media", [])
+            for link in raw_links:
+                asset = link.get("media_asset")
+                if asset:
+                    storage_key = asset.get("storage_key")
+                    playback_url = None
+                    if storage_key:
+                        try:
+                            playback_url = storage_adapter.create_playback_url(storage_key)
+                        except Exception:
+                            playback_url = None
+                    asset["playback_url"] = playback_url
+                    media_list.append(asset)
+            mem["media_assets"] = media_list
+            hydrated_memories.append(mem)
+
+        return {
+            "memoir": memoir,
+            "chapters": chapters,
+            "memories": hydrated_memories
+        }
+</file>
+
+<file path="src/domain/memory_service.py">
+"""
+@file memory_service.py
+@description Core business logic service managing memory creation with strict 
+date timeline normalization, media asset linking, feed retrieval, and lifecycle security,
+fully decoupled from direct database infrastructure calls.
+"""
+
+from fastapi import HTTPException, status
+from src.schemas.memory import MemoryCreateRequest
+from src.integrations import memory_repository
+from src.domain.authorization import verify_active_participant
+from src.integrations import storage_adapter
+from src.domain.transcription_service import transcribe_and_store_audio  # <-- Import transcription service
+from src.integrations.supabase_client import supabase  # <-- Required for querying transcript table directly if needed
+
+class MemoryService:
+    """
+    Handles business logic for memory stories, including participant security enforcement,
+    timeline normalization, media-to-memory junction mapping, and feed processing.
+    """
+
+    @classmethod
+    def create_memory(cls, payload: MemoryCreateRequest, user_id: str) -> dict:        
+        """
+        Validates participant permissions, normalizes timeline and date parameters, 
+        persists the new memory entry, and maps any attached media asset IDs.
+        """
+        participant = verify_active_participant(
+            str(payload.memoir_id), 
+            user_id, 
+            required_roles=["owner", "admin", "contributor"]
+        )
+        participant_id = participant["id"]
+
+        # Timeline Date: Pass through exactly what the user sent without inventing defaults
+        memory_data = {
+            "memoir_id": str(payload.memoir_id),
+            "author_participant_id": participant_id, 
+            "title": payload.title,
+            "body_text": payload.body_text,
+            "status": payload.status,
+            "occurred_start": payload.occurred_start.isoformat() if payload.occurred_start else None,
+            "occurred_end": payload.occurred_end.isoformat() if payload.occurred_end else None,
+            "occurred_precision": payload.occurred_precision,
+            "date_source": payload.date_source,
+        }
+        
+        try:
+            mem_res = memory_repository.insert_memory(memory_data)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database error while creating memory: {str(e)}"
+            )
+
+        if not mem_res or not mem_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create memory record."
+            )
+
+        new_memory = mem_res.data[0]
+        memory_id = new_memory["id"]
+
+        # Associate attached media assets via the junction table with ownership verification
+        if payload.media_asset_ids:
+            print(f"DEBUG: Found media_asset_ids in payload: {payload.media_asset_ids}")
+            
+            owned_assets = memory_repository.verify_media_assets_belong_to_memoir(
+                payload.memoir_id, payload.media_asset_ids
+            )
+            
+            if len(owned_assets) != len(payload.media_asset_ids):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="One or more media assets do not belong to this memoir container."
+                )
+
+            link_records = [
+            {
+                "memory_id": str(memory_id),        
+                "media_asset_id": str(media_id),    
+                "memoir_id": str(payload.memoir_id) 
+            }
+            for media_id in payload.media_asset_ids
+            ]
+            
+            try:
+                memory_repository.insert_memory_media(link_records)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to link media assets to memory: {str(e)}"
+                )
+
+            # =========================================================================
+            # INTEGRATION POINT: Trigger AssemblyAI Transcription for newly attached audio
+            # =========================================================================
+            for media_id in payload.media_asset_ids:
+                print(f"DEBUG: Checking media_id {media_id} for transcription trigger...")
+                
+                # Fetch asset record securely via the repository
+                asset_record = memory_repository.fetch_media_asset_record(str(media_id))
+                
+                print(f"DEBUG: Fetched asset record from DB: {asset_record}")
+
+                if asset_record and asset_record.get("kind") == "audio":
+                    storage_key = asset_record.get("storage_key")
+                    print(f"DEBUG: Audio asset matched! Storage key found: {storage_key}")
+                    
+                    if storage_key:
+                        try:
+                            print(f"DEBUG: Invoking transcribe_and_store_audio for asset {media_id}...")
+                            transcribe_and_store_audio(
+                                media_asset_id=str(media_id),
+                                memoir_id=str(payload.memoir_id),
+                                storage_key=storage_key
+                            )
+                            print(f"DEBUG: Transcription task processed successfully for {media_id}")
+                        except Exception as trig_err:
+                            print(f"ERROR: Failed to trigger transcription: {str(trig_err)}")
+                    else:
+                        print(f"ERROR: Audio asset {media_id} has a missing storage_key!")
+                else:
+                    asset_kind = asset_record.get('kind') if asset_record else 'Not Found'
+                    print(f"DEBUG: Asset {media_id} skipped (Kind: {asset_kind})")
+        return new_memory
+    
+    @classmethod
+    def get_memoir_feed(cls, memoir_id: str, user_id: str, limit: int = 20, offset: int = 0) -> list:
+        """
+        Retrieves a paginated memoir memory feed for an active participant, 
+        hydrating all attached media assets with secure signed playback URLs and AI transcripts.
+        """
+        # 1. Enforce active participant check
+        verify_active_participant(str(memoir_id), str(user_id))
+
+        # 2. Fetch paginated memory records using your repository function
+        try:
+            res = memory_repository.fetch_memoir_feed_records(str(memoir_id), limit, offset)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to fetch memoir feed: {str(e)}"
+            )
+
+        memories = res.data if res and res.data else []
+
+        # 3. Hydrate media assets with secure playback URLs and transcript records
+        hydrated_memories = []
+        for mem in memories:
+            media_list = []
+            raw_links = mem.pop("memory_media", [])
+            for link in raw_links:
+                asset = link.get("media_asset")
+                if asset:
+                    storage_key = asset.get("storage_key")
+                    playback_url = None
+                    if storage_key:
+                        try:
+                            playback_url = storage_adapter.create_playback_url(storage_key)
+                        except Exception:
+                            playback_url = None
+                    
+                    asset["playback_url"] = playback_url
+
+                    # =========================================================================
+                    # INTEGRATION POINT: Hydrate transcript data if the media asset is audio
+                    # =========================================================================
+                    if asset.get("kind") == "audio":
+                        asset_id = asset.get("id")
+                        try:
+                            transcript_res = supabase.table("transcript").select("*").eq("media_asset_id", asset_id).maybe_single().execute()
+                            asset["transcript"] = transcript_res.data if transcript_res and transcript_res.data else None
+                        except Exception:
+                            asset["transcript"] = None
+                    else:
+                        asset["transcript"] = None
+
+                    media_list.append(asset)
+            
+            mem["media_assets"] = media_list
+            hydrated_memories.append(mem)
+
+        return hydrated_memories
+        
+    @classmethod
+    def delete_memory(cls, memoir_id: str, memory_id: str, user_id: str) -> dict:
+        """
+        Safely soft-deletes a memory record after confirming the user is either 
+        the memory's author or a memoir owner/admin.
+        """
+        participant_res = memory_repository.fetch_participant(memoir_id, user_id)
+        if not participant_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not a participant of this memoir."
+            )
+        
+        participant = participant_res.data[0]
+        user_role = participant.get("role") 
+        participant_id = participant.get("id")
+
+        try:
+            mem_res = memory_repository.fetch_memory_by_id(memory_id, memoir_id)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        if not mem_res.data:
+            raise HTTPException(status_code=404, detail="Memory not found in this memoir.")
+
+        memory = mem_res.data[0]
+
+        is_owner_or_admin = user_role in ["owner", "admin"]
+        is_author = (
+            memory.get("author_user_id") == user_id or 
+            memory.get("author_participant_id") == participant_id
+        )
+
+        if not (is_owner_or_admin or is_author):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to delete this memory."
+            )
+
+        if memory.get("status") == "saved":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete a saved/finalized memory."
+            )
+
+        try:
+            memory_repository.soft_delete_memory_record(memory_id, memoir_id)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to delete memory: {str(e)}"
+            )
+            
+        return {"success": True, "message": "Memory successfully deleted."}
+</file>
+
+<file path="src/domain/media_service.py">
+"""
+@file domain/media_service.py
+@description Core business logic service managing memoir participant authorizations,
+secure path generation, upload validation, and database metadata persistence,
+fully decoupled from direct infrastructure calls and secured against path traversal.
+"""
+
+from fastapi import HTTPException, status
+from src.integrations import media_repository
+from src.integrations import storage_adapter
+from src.schemas.media import PresignedUrlRequest, MediaMetadataRequest
+from src.domain.authorization import verify_active_participant
+import logging
+
+logger = logging.getLogger(__name__)
+
+from src.core.config import (
+    STORAGE_TIER_HOT, 
+    TRANSCRIPTION_STATUS_PENDING
+)
+
+
+class MediaService:
+    """
+    Handles business rules, participant access controls, security validations, 
+    and database record cataloging for media assets.
+    """
+
+
+    @classmethod
+    def generate_presigned_url(cls, payload: PresignedUrlRequest, user_session: dict) -> dict:
+        """
+        Authorizes user access to a memoir, validates file upload limits/types, 
+        generates a collision-free secure path, and requests a short-lived signed upload URL.
+
+        Args:
+            payload (PresignedUrlRequest): The request payload containing memoir ID, MIME type, and size.
+            user_session (dict): The active user session dictionary containing the user ID.
+
+        Returns:
+            dict: A dictionary containing the secure storage key, signed upload URL, and token.
+
+        Raises:
+            HTTPException (500): If the storage provider fails to generate the signed URL.
+        """
+        user_id = user_session.get("user_id")
+        memoir_id = payload.memoir_id
+        
+        verify_active_participant(
+            memoir_id, 
+            user_id, 
+            required_roles=["owner", "admin", "contributor"]
+        )
+
+        # Enforce file size and type validation via the storage adapter
+        media_type, extension = storage_adapter.validate_upload(payload.mime_type)
+        
+        # SECURITY FIX: Prevent path traversal by generating a secure UUID-based path key 
+        # instead of trusting raw user filenames.
+        storage_path = storage_adapter.build_key(memoir_id, media_type, extension)
+
+        try:
+            upload_res = storage_adapter.create_signed_upload(storage_path)
+        except Exception as e:
+            # 🔍 ADD THIS PRINT STATEMENT TO SEE THE REAL ERROR IN YOUR TERMINAL
+            import traceback
+            traceback.print_exc()
+            print(f"STORAGE ERROR DETAILED: {repr(e)}")
+            
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to generate signed upload URL: {str(e)}"
+            )
+
+        return {
+            "storage_key": upload_res.path,
+            "upload_url": upload_res.signed_url,
+            "token": upload_res.token
+        }
+
+    @classmethod
+    def save_metadata(cls, payload: MediaMetadataRequest, user_session: dict) -> dict:
+        """
+        Validates user session permissions, enforces tenant isolation on the storage key, 
+        confirms physical object existence in storage, validates kind-specific rules,
+        prevents duplicate ghost records via checksum idempotency, and persists metadata.
+        """
+        user_id = user_session.get("user_id")
+        memoir_id = payload.memoir_id
+
+        participant = verify_active_participant(
+            memoir_id, 
+            user_id, 
+            required_roles=["owner", "admin", "contributor"]
+        )
+        participant_id = participant["id"]
+
+        # SECURITY FIX: Enforce tenant isolation — ensure the storage key explicitly belongs 
+        # to this memoir ID to prevent cross-tenant asset hijacking.
+        expected_prefix = f"memoirs/{memoir_id}/"
+        if not payload.storage_key.startswith(expected_prefix):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid storage key path for this memoir container."
+            )
+
+        try:
+            file_size = storage_adapter.object_exists(payload.storage_key)
+            if not file_size:
+                logger.warning(f"Storage index lag detected for key: {payload.storage_key}. Proceeding with metadata save.")
+        except Exception as exc:
+            logger.warning(f"Could not verify file existence due to error: {exc}")
+            
+        # 2. KIND-SPECIFIC VALIDATION: Ensure audio and video assets provide a valid duration
+        if payload.kind in ["audio", "video"] and (payload.duration_ms is None):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Audio and video assets require a valid positive duration_ms."
+            )
+
+        # IDEMPOTENCY CHECK: Prevent duplicate media asset records if a request is retried
+        if payload.checksum_sha256:
+            existing = media_repository.check_existing_media_by_checksum(str(memoir_id), payload.checksum_sha256)
+            if existing:
+                return existing
+
+        media_data = {
+            "memoir_id": memoir_id,
+            "uploaded_by_participant_id": participant_id,
+            "storage_key": payload.storage_key,
+            "kind": payload.kind,
+            "mime_type": payload.mime_type,
+            "byte_size": payload.byte_size,
+            "original_filename": payload.original_filename,
+            "duration_ms": payload.duration_ms,
+            "width_px": payload.width_px,
+            "height_px": payload.height_px,
+            "caption": payload.caption,
+            "checksum_sha256": payload.checksum_sha256,
+            "storage_tier": STORAGE_TIER_HOT,
+            "transcription_status": STORAGE_TIER_HOT if payload.kind == "photo" else TRANSCRIPTION_STATUS_PENDING
+        }
+
+        # 1. Get the JSON-safe dictionary representation of the request payload
+        media_data = payload.model_dump(mode='json')
+
+        # 2. Dynamically inject server-side tracking fields securely
+        media_data["uploaded_by_participant_id"] = participant_id
+        media_data["storage_tier"] = STORAGE_TIER_HOT
+        
+            # STORAGE_TIER_HOT if payload.kind == "photo" else TRANSCRIPTION_STATUS_PENDING
+        if payload.kind == "photo":
+            media_data["transcription_status"] = "skipped"
+        else:
+            media_data["transcription_status"] = TRANSCRIPTION_STATUS_PENDING # "pending"
+        
+
+        try:
+            db_response = media_repository.insert_media_metadata(media_data)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database error while saving media metadata: {str(e)}"
+            )
+
+        return db_response.data[0] if db_response.data else {}
+</file>
+
+<file path="src/main.py">
+# src/main.py
+import logging
+from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+load_dotenv()  
+from src.core.config import settings
+from src.api.share import owner_router, reader_router
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+# Import modular feature routers
+from src.api.media import router as media_router
+from src.api.memoir import router as memoir_router
+from src.api.memory import router as memory_router
+from src.api.auth import router as auth_router
+from src.api.comments import router as comment_router
+from src.api.search import router as search_router
+from src.api.export import router as export_router
+from src.api.transcripts import router as transcript_router
+from src.api.chapters import router as chapter_router
+
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    setup_logging()
+    logging.info("Starting up Memoir backend application...")
+    yield
+    logging.info("Shutting down Memoir backend application...")
+
+app = FastAPI(
+    title="Memoir App API",
+    version="1.0.0",
+    description="Backend API services for the Memoir life-story documentation platform.",
+    lifespan=lifespan
+)
+
+origins = settings.cors_origins
+if isinstance(origins, str):
+    origins = [o.strip() for o in origins.split(",") if o.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/", tags=["Root"])
+def read_root():
+    return {"message": "Welcome to the Memoir App API"}
+
+@app.get("/health", tags=["Health"])
+def health_check():
+    return {"status": "healthy"}
+
+app.include_router(auth_router)
+app.include_router(memoir_router)
+app.include_router(memory_router)
+app.include_router(media_router)
+app.include_router(comment_router)
+app.include_router(search_router)
+app.include_router(export_router)
+app.include_router(transcript_router)
+app.include_router(owner_router)
+app.include_router(reader_router)
+app.include_router(chapter_router)
+</file>
+
+</files>

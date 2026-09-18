@@ -14,12 +14,12 @@ class CommentsRepository:
         """Fetches raw comments without database embedding to avoid cache sync issues."""
         try:
             response = supabase_admin.table("comment")\
-                .select("*")\
-                .eq("memory_id", memory_id)\
-                .is_("deleted_at", None)\
-                .is_("hidden_at", None)\
-                .order("created_at", desc=False)\
-                .execute()
+    .select("*")\
+    .eq("memory_id", memory_id)\
+    .is_("deleted_at", "null")\
+    .is_("hidden_at", "null")\
+    .order("created_at", desc=False)\
+    .execute()
 
             data = response.data or []
             formatted_comments = []
@@ -73,10 +73,10 @@ class CommentsRepository:
             }
 
             # Insert and select only the comment record itself (no embedded joins)
+            # also normalize the insert (drop the non-standard .select() chain after .insert())
             response = supabase_admin.table("comment")\
-                .insert(insert_data)\
-                .select("*")\
-                .execute()
+            .insert(insert_data)\
+            .execute()
 
             data = response.data or []
             if not data:

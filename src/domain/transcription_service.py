@@ -1,9 +1,9 @@
 import os
 import time
 import assemblyai as aai
-# Add this import at the top:
 from src.integrations.memory_repository import upsert_transcript_record
 from src.integrations.supabase_client import supabase_admin
+from src.core.config import settings
 
 def transcribe_and_store_audio(media_asset_id: str, memoir_id: str, storage_key: str):
     """
@@ -19,10 +19,9 @@ def transcribe_and_store_audio(media_asset_id: str, memoir_id: str, storage_key:
     transcriber = aai.Transcriber()
 
     try:
-        bucket_name = "media-bucket"  
+        bucket_name = settings.supabase_media_bucket
         audio_bytes = None
         
-        # Retry loop (up to 3 attempts with a 1.5s delay) to handle browser upload race conditions
         print(f"Attempting to download storage key '{storage_key}' from bucket '{bucket_name}'...")
         for attempt in range(1, 4):
             try:

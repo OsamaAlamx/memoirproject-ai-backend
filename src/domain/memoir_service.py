@@ -1,38 +1,26 @@
 """
 @file memoir_service.py
 @description Business logic and orchestration service for creating memoir containers, 
-normalizing subject dates, and automatically registering the creator as the owner participant,
-fully decoupled from direct database infrastructure calls.
+normalizing subject dates, automatically registering creator as owner participant,
+and retrieving live memoir records with signed media URLs.
 """
 
 from fastapi import HTTPException, status
 from src.integrations import memoir_repository
+from src.integrations import storage_adapter
+from src.integrations.supabase_client import supabase_admin
+from src.domain.authorization import verify_active_participant
 from src.schemas.memoir import MemoirCreateRequest
+
 
 class MemoirService:
     """
     Handles business logic for memoir creation, account profile resolution,
-    and automatic participant role assignments.
+    participant role assignments, and fetching live memoir details.
     """
 
     @staticmethod
     def create_memoir(payload: MemoirCreateRequest, user_session: dict) -> dict:
-        """
-        Validates user session authentication, fetches creator profile details, 
-        inserts a new memoir container record, and automatically registers the creator 
-        as an authorized participant with the 'owner' role.
-
-        Args:
-            payload (MemoirCreateRequest): The validated memoir creation request data.
-            user_session (dict): The active user session dictionary containing the user ID.
-
-        Returns:
-            dict: The newly created root memoir database record.
-
-        Raises:
-            HTTPException (401): If the user session is missing a valid user ID.
-            HTTPException (500): If database insertion or participant registration fails.
-        """
         user_id = user_session.get("user_id")
 
         if not user_id:
@@ -41,7 +29,6 @@ class MemoirService:
                 detail="User session is missing user ID."
             )
 
-        # 1. Fetch user account details using repository
         try:
             user_res = memoir_repository.fetch_user_account(user_id)
         except Exception as e:
@@ -54,7 +41,6 @@ class MemoirService:
         display_name = user_record.get("full_name") or "Memoir Owner"
         user_email = user_record.get("email")
 
-        # 2. Prepare root memoir payload
         memoir_data = {
             "subject_name": payload.subject_name,
             "subject_born_on": str(payload.subject_born_on) if payload.subject_born_on else None,
@@ -87,11 +73,10 @@ class MemoirService:
         try:
             memoir_repository.insert_memoir_participant(participant_data)
         except Exception as e:
-            # COMPENSATION ROLLBACK: Delete the orphan memoir if participant insertion fails
             try:
                 memoir_repository.delete_memoir_record(memoir_id)
             except Exception:
-                pass  # Fallback log if cleanup fails
+                pass
             
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -99,3 +84,65 @@ class MemoirService:
             )
             
         return created_memoir
+
+    @classmethod
+    def get_live_memoir(cls, memoir_id: str, user_id: str) -> dict:
+        """
+        Verifies participant authorization and returns the full live memoir details
+        including metadata, assigned chapters, and active memories with signed playback URLs.
+        """
+        verify_active_participant(str(memoir_id), str(user_id))
+
+        memoir_res = supabase_admin.table("memoir").select("*").eq("id", memoir_id).execute()
+        if not memoir_res.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Memoir container not found."
+            )
+
+        memoir = memoir_res.data[0]
+
+        chapters_res = (
+            supabase_admin.table("chapter")
+            .select("*")
+            .eq("memoir_id", memoir_id)
+            .order("sort_order", desc=False)
+            .execute()
+        )
+        chapters = chapters_res.data or []
+
+        memories_res = (
+    supabase_admin.table("memory")
+    .select("*, memory_media(*, media_asset(*))")
+    .eq("memoir_id", memoir_id)
+    .is_("deleted_at", "null")
+    .order("occurred_start", desc=False)   # chronological
+    .order("created_at", desc=False)       # tie-breaker for same/no date
+    .execute()
+)
+        memories_raw = memories_res.data or []
+
+        hydrated_memories = []
+        for mem in memories_raw:
+            media_list = []
+            raw_links = mem.pop("memory_media", [])
+            for link in raw_links:
+                asset = link.get("media_asset")
+                if asset:
+                    storage_key = asset.get("storage_key")
+                    playback_url = None
+                    if storage_key:
+                        try:
+                            playback_url = storage_adapter.create_playback_url(storage_key)
+                        except Exception:
+                            playback_url = None
+                    asset["playback_url"] = playback_url
+                    media_list.append(asset)
+            mem["media_assets"] = media_list
+            hydrated_memories.append(mem)
+
+        return {
+            "memoir": memoir,
+            "chapters": chapters,
+            "memories": hydrated_memories
+        }

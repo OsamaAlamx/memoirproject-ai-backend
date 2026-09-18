@@ -1,6 +1,7 @@
 """
 @file api/memoir.py
-@description FastAPI router handling HTTP endpoints for memoir creation and management.
+@description FastAPI router handling HTTP endpoints for memoir creation, 
+management, and live memoir retrieval.
 """
 
 from fastapi import APIRouter, Depends, status
@@ -19,7 +20,6 @@ def create_memoir(
     Creates a new root memoir container for a subject. 
     This must be executed first to obtain a memoir_id before adding media or memories.
     """
-    # extract user ID string from the dictionary
     user_id = current_user.get("user_id") or current_user.get("id") or current_user.get("sub")
     
     user_session = {"user_id": user_id}
@@ -28,4 +28,19 @@ def create_memoir(
         "success": True,
         "message": "Memoir successfully created.",
         "data": new_memoir
+    }
+
+@router.get("/{memoir_id}/live", status_code=status.HTTP_200_OK)
+def get_live_memoir(
+    memoir_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Retrieves live memoir metadata, chapters, and memory entries for active participants.
+    """
+    user_id = current_user.get("user_id") or current_user.get("id") or current_user.get("sub")
+    data = MemoirService.get_live_memoir(memoir_id, user_id)
+    return {
+        "success": True,
+        "data": data
     }

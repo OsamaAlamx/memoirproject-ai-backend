@@ -3,12 +3,11 @@
 @description Database repository for memoir export job tracking and memoir data retrieval.
 """
 
-import os
 from src.integrations.supabase_client import supabase_admin
+from src.core.config import settings
 from datetime import datetime, timezone
 
-# Use your project's environment bucket name or fallback to media-bucket
-BUCKET_NAME = os.getenv("SUPABASE_BUCKET_NAME", "media-bucket")
+BUCKET_NAME = settings.supabase_media_bucket
 
 class ExportRepository:
 
@@ -54,11 +53,9 @@ class ExportRepository:
         Fetches memoir details, memories, media assets, and audio transcripts.
         Strictly excludes comments to ensure export represents a static keepsake archive.
         """
-        # 1. Fetch Memoir metadata
         memoir_res = supabase_admin.table("memoir").select("*").eq("id", memoir_id).single().execute()
         memoir_data = memoir_res.data if memoir_res else {}
 
-        # 2. Fetch all memories ordered by date
         memories_res = (
             supabase_admin.table("memory")
             .select("id, title, body_text, occurred_start, created_at")
@@ -68,7 +65,6 @@ class ExportRepository:
         )
         memories = memories_res.data if memories_res.data else []
 
-        # 3. Fetch media assets linked to the memoir
         media_res = (
             supabase_admin.table("media_asset")
             .select("id, memoir_id, storage_key, caption, kind")
@@ -77,7 +73,6 @@ class ExportRepository:
         )
         media_assets = media_res.data if media_res.data else []
 
-        # 4. Fetch transcripts for audio/voice entries
         transcripts_res = (
             supabase_admin.table("transcript")
             .select("media_asset_id, display_text")

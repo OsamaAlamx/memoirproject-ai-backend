@@ -12,7 +12,6 @@ from src.core.config import SUPABASE_JWKS_URL
 
 security = HTTPBearer()
 
-# Initialize the PyJWKClient to fetch and cache public signing keys from Supabase
 jwks_client = PyJWKClient(SUPABASE_JWKS_URL) if SUPABASE_JWKS_URL else None
 
 
@@ -29,13 +28,13 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
                 detail="SUPABASE_JWKS_URL is not configured for local JWT validation."
             )
 
-        # Fetch matching signing key and decode/verify token locally
         signing_key = jwks_client.get_signing_key_from_jwt(token)
         payload = jwt.decode(
             token,
             signing_key.key,
             algorithms=["HS256", "ES256", "RS256"],
-            audience="authenticated"
+            audience="authenticated",
+            leeway=60
         )
 
         user_id = payload.get("sub")
@@ -53,7 +52,6 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         }
 
     except HTTPException:
-        # CRITICAL: Re-raise HTTPExceptions directly so status codes (e.g. 401) aren't swallowed or re-wrapped
         raise
     except jwt.PyJWTError as e:
         raise HTTPException(
