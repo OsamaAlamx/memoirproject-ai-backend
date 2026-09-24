@@ -117,3 +117,19 @@ def fetch_live_memoir_data(memoir_id: str):
         "participants": participants,
         "photos": photos,
     }
+
+def fetch_user_active_memoir(user_id: str):
+    """
+    Fetches the primary active memoir for a user via memoir_participant.
+    """
+    res = supabase_admin.table("memoir_participant")\
+        .select("memoir_id, role, memoir(*)")\
+        .eq("user_id", user_id)\
+        .is_("removed_at", "null")\
+        .order("created_at", desc=True)\
+        .limit(1)\
+        .execute()
+
+    if res.data and len(res.data) > 0:
+        return res.data[0].get("memoir")
+    return None

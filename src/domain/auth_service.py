@@ -1,8 +1,9 @@
-# src/domain/auth_service.py
+# In src/domain/auth_service.py
+
 import logging
 from datetime import datetime, timezone
 from fastapi import HTTPException, status
-from src.integrations import auth_repository
+from src.integrations import auth_repository, memoir_repository
 from src.schemas.auth import UserRegisterRequest, UserLoginRequest
 from src.integrations.supabase_client import supabase
 
@@ -92,7 +93,7 @@ class AuthService:
     def login_user(payload: UserLoginRequest) -> dict:
         """
         Authenticates an existing user via Supabase Auth password verification, 
-        updates their last login timestamp in the database, and returns an active token.
+        updates their last login timestamp, and fetches their active memoir.
         """
         try:
             response = auth_repository.auth_sign_in(payload.email, payload.password)
@@ -116,9 +117,16 @@ class AuthService:
         except Exception as db_err:
             logger.warning("Failed to update last login timestamp: %s", str(db_err))
 
+        active_memoir = None
+        try:
+            active_memoir = memoir_repository.fetch_user_active_memoir(user_id)
+        except Exception as m_err:
+            logger.warning("Failed to fetch active memoir during login: %s", str(m_err))
+
         return {
             "user_id": user_id,
             "email": response.user.email,
             "access_token": access_token,
+            "active_memoir": active_memoir,
             "message": "Login successful."
         }

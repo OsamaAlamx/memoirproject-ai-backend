@@ -8,6 +8,8 @@ from fastapi import HTTPException, status
 from xhtml2pdf import pisa
 from src.domain.authorization import verify_active_participant
 from src.integrations.export_repository import ExportRepository
+from src.integrations import storage_adapter
+
 
 class ExportService:
 
@@ -15,8 +17,8 @@ class ExportService:
     def initiate_export(cls, memoir_id: str, user_id: str) -> dict:
         """Validates permissions and queues a new PDF export job."""
         participant = verify_active_participant(
-            memoir_id, 
-            user_id, 
+            memoir_id,
+            user_id,
             required_roles=["owner", "admin", "contributor"]
         )
         participant_id = participant.get("id")
@@ -34,30 +36,25 @@ class ExportService:
     def process_export_background(cls, export_id: str, memoir_id: str) -> None:
         """Background worker method to compile data, generate PDF via xhtml2pdf, and upload to storage."""
         try:
-            # 1. Fetch structured memoir payload (excluding comments)
             payload = ExportRepository.fetch_memoir_export_payload(memoir_id)
             memoir = payload["memoir"]
             memories = payload["memories"]
             media_assets = payload["media_assets"]
             transcripts = payload["transcripts"]
 
-            # 2. Build professional print HTML template (Book layout)
             html_content = cls._render_memoir_html(memoir, memories, media_assets, transcripts)
 
-            # 3. Compile HTML to PDF bytes using xhtml2pdf
             pdf_buffer = io.BytesIO()
             pisa_status = pisa.CreatePDF(html_content, dest=pdf_buffer)
-            
+
             if pisa_status.err:
                 raise Exception("Failed to compile HTML into PDF using xhtml2pdf.")
-            
+
             pdf_bytes = pdf_buffer.getvalue()
 
-            # 4. Upload to Supabase Storage
             storage_key = f"exports/pdf-archives/{memoir_id}/{export_id}.pdf"
             ExportRepository.upload_pdf_to_storage(storage_key, pdf_bytes)
 
-            # 5. Mark job as ready
             ExportRepository.update_job_status(
                 export_id=export_id,
                 status="ready",
@@ -92,11 +89,12 @@ class ExportService:
             </div>
             """
 
-        # Render media photo gallery if any exist
         photos_html = ""
         for ma in media_assets:
             if ma.get("kind") == "photo" and ma.get("storage_key"):
-                img_url = ma.get("storage_key")
+                img_url = storage_adapter.create_playback_url(ma.get("storage_key"))
+                if not img_url:
+                    continue
                 caption = ma.get("caption") or ""
                 photos_html += f"""
                 <div class="photo-container">
@@ -105,7 +103,6 @@ class ExportService:
                 </div>
                 """
 
-        # Render audio transcripts section if any exist
         transcripts_html = ""
         for t in transcripts:
             t_text = t.get("display_text") or ""
@@ -211,9 +208,9 @@ class ExportService:
             <div class="content">
                 <div class="section-title">Memories</div>
                 {memories_html}
-                
+
                 {f'<div class="section-title">Photo Gallery</div>{photos_html}' if photos_html else ''}
-                
+
                 {f'<div class="section-title">Voice Transcripts</div>{transcripts_html}' if transcripts_html else ''}
             </div>
         </body>

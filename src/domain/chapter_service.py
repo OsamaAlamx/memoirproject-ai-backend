@@ -39,10 +39,10 @@ class MCPClient:
         return self.server.execute_tool(name, payload)
 
 
-def _call_llm_json(prompt: str) -> dict | None:
+def _call_llm_json(prompt: str, max_tokens: int = 8000) -> dict | None:
     api_key = settings.llm_api_key or os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
-        print("LLM Error: No API key found in environment.")
+        print("🚨 LLM Error: No API key found (LLM_API_KEY / GROQ_API_KEY / OPENAI_API_KEY missing).")
         return None
 
     base_url = (settings.llm_base_url or "https://api.groq.com/openai/v1").rstrip("/")
@@ -51,11 +51,11 @@ def _call_llm_json(prompt: str) -> dict | None:
     candidate_models = [
         settings.llm_model,
         "llama-3.3-70b-versatile",
-        "llama-3.1-8b-instant",
         "openai/gpt-oss-120b",
         "meta-llama/llama-4-scout-17b-16e-instruct",
         "qwen/qwen3-32b",
         "moonshotai/kimi-k2-instruct",
+        "llama-3.1-8b-instant",
     ]
     models_to_try = []
     for m in candidate_models:
@@ -69,13 +69,17 @@ def _call_llm_json(prompt: str) -> dict | None:
                 {
                     "role": "system",
                     "content": (
-                        "You are a master biographer and memoir editor. "
-                        "Always respond with valid JSON only. No markdown, no code fences."
+                        "You are a professional biographer and narrative nonfiction "
+                        "ghostwriter. Always respond with valid, COMPLETE JSON only. "
+                        "No markdown, no code fences, no trailing commentary. "
+                        "Never truncate — if you are running low on space, write "
+                        "shorter paragraphs, but always close every JSON bracket."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.6, # Slightly increased for better creative flow
+            "temperature": 0.75,
+            "max_tokens": max_tokens,
         }
         if "groq" in base_url or "openai" in base_url:
             payload["response_format"] = {"type": "json_object"}
@@ -88,40 +92,58 @@ def _call_llm_json(prompt: str) -> dict | None:
                     "Content-Type": "application/json",
                 },
                 json=payload,
-                timeout=60.0,
+                timeout=90.0,
             )
             if response.status_code == 200:
-                content = response.json()["choices"][0]["message"]["content"].strip()
+                body = response.json()
+                content = body["choices"][0]["message"]["content"].strip()
+                finish_reason = body["choices"][0].get("finish_reason")
+
+                if finish_reason == "length":
+                    print(f"⚠️  LLM response for model '{model}' was TRUNCATED "
+                          f"(finish_reason=length). Trying next model / retry with more tokens.")
+                    continue
+
                 if content.startswith("```json"):
                     content = content[7:]
                 if content.startswith("```"):
                     content = content[3:]
                 if content.endswith("```"):
                     content = content[:-3]
-                return json.loads(content.strip())
+
+                try:
+                    return json.loads(content.strip())
+                except json.JSONDecodeError as parse_err:
+                    print(f"⚠️  LLM model '{model}' returned invalid JSON "
+                          f"({parse_err}). First 300 chars: {content[:300]!r}")
+                    continue
+
             print(f"LLM API Warning ({response.status_code}) model='{model}': {response.text[:300]}")
         except Exception as err:
             print(f"LLM Call error for model '{model}': {err}")
 
+    print("🚨 ALL LLM MODELS FAILED — falling back to naive local synthesis. "
+          "Output quality WILL be degraded (near-verbatim excerpts, date-only grouping). "
+          "Check LLM_API_KEY / GROQ_API_KEY, model availability, and network access.")
     return None
 
 
 def _fallback_summary(facts: list) -> str:
-    """Build a beautifully flowing fallback paragraph from the actual memory texts."""
     snippets = []
     for f in facts:
-        text = (f.get("story_content") or f.get("title") or "").strip()
+        text = (f.get("full_text") or f.get("story_content") or f.get("title") or "").strip()
         if text:
             cut = text.replace("\n", " ")
             if len(cut) > 200:
                 cut = cut[:200].rsplit(" ", 1)[0] + "…"
             snippets.append(cut)
     if not snippets:
-        return "A collection of treasured family moments from this period of life. Every story preserved here adds a vital piece to the larger, beautiful puzzle of their journey."
+        return ("[AI synthesis unavailable] A collection of treasured moments from this "
+                "period of life.")
     joined = " ".join(snippets)
     if len(joined) > 800:
         joined = joined[:800].rsplit(" ", 1)[0] + "…"
-    return joined
+    return "[AI synthesis unavailable — raw excerpts shown] " + joined
 
 
 def _fallback_title(era: str, facts: list) -> str:
@@ -130,60 +152,49 @@ def _fallback_title(era: str, facts: list) -> str:
         if t and len(t) < 60:
             return t.title() if t.islower() else t
     clean = (era or "Memories").replace("The ", "").strip()
-    return f"Memories of the {clean}" if clean[0].isdigit() else clean
+    return f"Memories of the {clean}" if clean[:1].isdigit() else clean
 
 
 class ReaderAgent:
+    """
+    Loads raw memories and passes FULL text forward. Now also includes
+    audio transcripts so the AI can understand spoken memories too.
+    """
     def __init__(self, client: MCPClient):
         self.client = client
 
     def extract_facts(self):
         memories = self.client.read_resource("memories")
-        
-        # Sort chronologically to help the LLM establish a natural, ascending timeline
         memories = sorted(memories, key=lambda x: x.get("occurred_start") or "9999-12-31")
-
-        prompt = f"""
-Analyze these memoir entries. For each one extract structured facts.
-{json.dumps(memories, indent=2)}
-
-Return JSON exactly as:
-{{
-  "facts": [
-    {{
-      "id": "memory_uuid",
-      "title": "entry title",
-      "date": "YYYY-MM-DD or null",
-      "chapter_id": "existing_chapter_id or null",
-      "extracted_era": "e.g. 1980s, Childhood, College Years",
-      "topic": "main theme",
-      "story_content": "3-4 sentence summary of what happened (paraphrase, do not copy full text)"
-    }}
-  ]
-}}
-"""
-        llm_res = _call_llm_json(prompt)
-        if llm_res and "facts" in llm_res:
-            return llm_res["facts"]
 
         facts = []
         for m in memories:
             date_val = m.get("occurred_start")
-            extracted_era = "Timeless Memories"
+            era_guess = "Undated"
             if date_val and len(str(date_val)) >= 4:
-                year = str(date_val)[:4]
-                if year.isdigit():
-                    extracted_era = f"The {year[:3]}0s"
+                year_str = str(date_val)[:4]
+                if year_str.isdigit():
+                    era_guess = f"{year_str[:3]}0s"
 
-            body = m.get("body_text") or ""
+            # Combine written body_text + audio transcripts into the AI's context
+            text_parts = []
+            if m.get("body_text"):
+                text_parts.append(str(m["body_text"]).strip())
+
+            transcripts = m.get("transcripts") or []
+            for tr in transcripts:
+                if tr and str(tr).strip():
+                    text_parts.append(f"[AUDIO TRANSCRIPT]\n{str(tr).strip()}")
+
+            full_text = "\n\n".join([p for p in text_parts if p]).strip()
+
             facts.append({
                 "id": m["id"],
                 "title": m.get("title") or "Untitled Entry",
                 "date": m.get("occurred_start"),
+                "era_guess": era_guess,
                 "chapter_id": m.get("chapter_id"),
-                "extracted_era": extracted_era,
-                "topic": m.get("title") or "Memory",
-                "story_content": body[:400] if body else (m.get("title") or ""),
+                "full_text": full_text,
             })
         return facts
 
@@ -195,30 +206,54 @@ class OrganizerAgent:
     def propose(self, facts):
         existing_chapters = {c["id"]: c for c in self.client.read_resource("chapters")}
 
+        source_material = "\n\n".join([
+            f"[MEMORY ID: {f['id']}]\n"
+            f"Contributor's Title: {f['title']}\n"
+            f"Date: {f['date'] or 'Unknown'}\n"
+            f"Raw Account:\n{f['full_text'] or '(No written text — media only, use title/date as context.)'}"
+            for f in facts
+        ])
+
         prompt = f"""
-You are a master biographer organizing a family memoir into beautiful, flowing chapters.
+You are ghostwriting a published-quality narrative biography, in the style of
+"Unbroken" or Walter Isaacson's biographies. You have been handed raw oral-history
+style contributions from people who knew the subject — think of these as
+unedited interview transcripts, not finished prose.
 
-MEMORY FACTS:
-{json.dumps(facts, indent=2)}
+RAW SOURCE MATERIAL (interview transcripts / contributor accounts):
+{source_material}
 
-EXISTING CHAPTERS (if any):
+EXISTING CHAPTERS (optional — you may keep, rename, merge, or discard entirely):
 {json.dumps(list(existing_chapters.values()), indent=2)}
 
-STRICT RULES:
-1. Create 3 to 6 chapters to beautifully cover the subject's life.
-2. Order the chapters in STRICT ASCENDING CHRONOLOGICAL ORDER (e.g., Birth, Early Years, School, Adulthood, Later Life). Progress naturally through time.
-3. Each chapter MUST have:
-   - "title": a short original artistic title (e.g. "First Steps", "The Open Window"). NEVER use a raw memory title.
-   - "summary": A rich, beautifully written, highly engaging biographical narrative (2 to 4 paragraphs) that synthesizes all memories in that chapter. Connect the dots into a smooth, flowing story. Do NOT just list memory titles. Make it read like a published biography.
-   - "memories": array of {{ "id", "title", "date" }} for every memory placed in the chapter. Order these memories chronologically within the chapter!
-4. Every memory id must appear in exactly one chapter.
+================================================================================
+NON-NEGOTIABLE RULES:
 
-Return JSON exactly as:
+1. NEVER COPY THE SOURCE TEXT. Do not lift sentences or distinctive phrases
+   verbatim from the raw accounts. Paraphrase and rewrite everything into your
+   own original narrative prose.
+
+2. ORGANIZE BY MEANING AND LIFE-STAGE, NOT JUST BY DATE. Read every account
+   first, understand the arc of this person's life, then decide chapter
+   boundaries around themes.
+
+3. CREATE 3 TO 6 CHAPTERS spanning the subject's full story arc, in ascending
+   chronological/narrative order (earliest life stage first).
+
+4. EACH CHAPTER MUST HAVE:
+   - "title": an original, evocative, literary chapter title.
+   - "summary": 3 to 6 paragraphs of ORIGINAL narrative prose.
+   - "memories": array of {{ "id", "title", "date" }} for every raw memory
+     used in this chapter.
+
+5. Every memory id from the source material must appear in EXACTLY ONE chapter.
+
+Return ONLY valid, complete JSON, exactly in this shape:
 {{
   "chapters": [
     {{
       "title": "Original Chapter Title",
-      "summary": "Rich synthesized biographical narrative paragraph 1.\\n\\nParagraph 2...",
+      "summary": "Paragraph 1...\\n\\nParagraph 2...\\n\\nParagraph 3...",
       "memories": [
         {{ "id": "memory_id", "title": "entry title", "date": "date or null" }}
       ]
@@ -226,26 +261,27 @@ Return JSON exactly as:
   ]
 }}
 """
-        llm_res = _call_llm_json(prompt)
+        llm_res = _call_llm_json(prompt, max_tokens=8000)
         if llm_res and "chapters" in llm_res:
             return self.client.call_tool("propose_chapter_set", {"chapters": llm_res["chapters"]})
 
+        print("⚠️  OrganizerAgent falling back to naive chronological grouping.")
+
         buckets: dict[str, list] = {}
         for f in facts:
-            key = f.get("extracted_era") or "Timeless Reflections"
+            key = f.get("era_guess") or "Timeless Reflections"
             buckets.setdefault(key, []).append(f)
 
-        # Guardrail: the fallback path must never produce ~1 chapter per memory.
         MAX_CHAPTERS = 6
         if len(facts) > MAX_CHAPTERS and len(buckets) > MAX_CHAPTERS:
             all_sorted = sorted(facts, key=lambda x: x.get("date") or "9999-12-31")
-            chunk_size = max(2, -(-len(all_sorted) // MAX_CHAPTERS))  # ceil division
+            chunk_size = max(2, -(-len(all_sorted) // MAX_CHAPTERS))
             buckets = {}
             for i in range(0, len(all_sorted), chunk_size):
                 chunk = all_sorted[i:i + chunk_size]
                 if not chunk:
                     continue
-                label = chunk[0].get("extracted_era") or f"Chapter {i // chunk_size + 1}"
+                label = chunk[0].get("era_guess") or f"Chapter {i // chunk_size + 1}"
                 buckets[f"{label}__{i}"] = chunk
 
         proposal = []
@@ -254,11 +290,7 @@ Return JSON exactly as:
                 "title": _fallback_title(era, items),
                 "summary": _fallback_summary(items),
                 "memories": [
-                    {
-                        "id": it["id"],
-                        "title": it.get("title") or "Untitled Entry",
-                        "date": it.get("date"),
-                    }
+                    {"id": it["id"], "title": it.get("title") or "Untitled Entry", "date": it.get("date")}
                     for it in items
                 ],
             })
@@ -273,7 +305,9 @@ class RefinerAgent:
         memories = self.client.read_resource("memories")
 
         prompt = f"""
-You are refining a memoir chapter proposal based on the owner's chat request.
+You are refining a biography's chapter breakdown based on the owner's request.
+Follow the same non-negotiable rules as the original synthesis pass: never copy
+source text verbatim, organize by life-stage/theme, write original prose.
 
 CURRENT PROPOSAL:
 {json.dumps(current_proposal, indent=2)}
@@ -281,21 +315,21 @@ CURRENT PROPOSAL:
 OWNER REQUEST:
 "{user_prompt}"
 
-RAW MEMORIES (reference only):
+RAW SOURCE MATERIAL (reference only):
 {json.dumps(memories, indent=2)}
 
 RULES:
-1. Apply the owner's request (merge/split/rename/retone as asked).
-2. Ensure chapters remain in strict chronological ascending order.
-3. Each chapter needs an original "title" and a rich, beautifully written biographical "summary" (2 to 4 paragraphs) covering all of its memories with smooth narrative flow. Do NOT copy full body text into the summary.
-4. Keep every memory id assigned to exactly one chapter.
+1. Apply the owner's request.
+2. Keep chapters in ascending chronological/narrative order.
+3. Each chapter needs an original title and 3-6 paragraphs of original summary.
+4. Every memory id stays assigned to exactly one chapter.
 
-Return JSON exactly as:
+Return ONLY valid JSON in this shape:
 {{
   "chapters": [
     {{
       "title": "Chapter Title",
-      "summary": "Rich synthesized biographical paragraph 1.\\n\\nParagraph 2...",
+      "summary": "Paragraph 1...\\n\\nParagraph 2...",
       "memories": [
         {{ "id": "memory_id", "title": "entry title", "date": "date or null" }}
       ]
@@ -303,9 +337,11 @@ Return JSON exactly as:
   ]
 }}
 """
-        llm_res = _call_llm_json(prompt)
+        llm_res = _call_llm_json(prompt, max_tokens=8000)
         if llm_res and "chapters" in llm_res:
             return self.client.call_tool("propose_chapter_set", {"chapters": llm_res["chapters"]})
+
+        print("⚠️  RefinerAgent: LLM refinement failed, returning proposal unchanged.")
         return current_proposal
 
 
@@ -331,7 +367,7 @@ class ReviewerAgent:
                 valid.append({
                     "title": ch.get("title") or "Untitled Chapter",
                     "summary": ch.get("summary") or _fallback_summary([
-                        {"story_content": m.get("title", "")} for m in clean
+                        {"full_text": m.get("title", "")} for m in clean
                     ]),
                     "memories": clean,
                 })

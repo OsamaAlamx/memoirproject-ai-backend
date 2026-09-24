@@ -7,9 +7,11 @@ management, and live memoir retrieval.
 from fastapi import APIRouter, Depends, status
 from src.schemas.memoir import MemoirCreateRequest, MemoirResponseEnvelope
 from src.domain.memoir_service import MemoirService
+from src.integrations import memoir_repository
 from src.core.auth import get_current_user
 
 router = APIRouter(prefix="/api/memoirs", tags=["Memoirs"])
+
 
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=MemoirResponseEnvelope)
 def create_memoir(
@@ -29,6 +31,22 @@ def create_memoir(
         "message": "Memoir successfully created.",
         "data": new_memoir
     }
+
+
+@router.get("/user/active", status_code=status.HTTP_200_OK)
+def get_user_active_memoir(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Fetches the active memoir belonging to the authenticated user.
+    """
+    user_id = current_user.get("user_id") or current_user.get("id") or current_user.get("sub")
+    memoir = memoir_repository.fetch_user_active_memoir(str(user_id))
+    return {
+        "success": True,
+        "data": memoir
+    }
+
 
 @router.get("/{memoir_id}/live", status_code=status.HTTP_200_OK)
 def get_live_memoir(

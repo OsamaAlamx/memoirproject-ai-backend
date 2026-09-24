@@ -2,7 +2,7 @@
 @file memoir_service.py
 @description Business logic and orchestration service for creating memoir containers, 
 normalizing subject dates, automatically registering creator as owner participant,
-and retrieving live memoir records with signed media URLs.
+and retrieving live memoir records with signed media URLs and audio transcripts.
 """
 
 from fastapi import HTTPException, status
@@ -14,10 +14,6 @@ from src.schemas.memoir import MemoirCreateRequest
 
 
 class MemoirService:
-    """
-    Handles business logic for memoir creation, account profile resolution,
-    participant role assignments, and fetching live memoir details.
-    """
 
     @staticmethod
     def create_memoir(payload: MemoirCreateRequest, user_session: dict) -> dict:
@@ -89,7 +85,7 @@ class MemoirService:
     def get_live_memoir(cls, memoir_id: str, user_id: str) -> dict:
         """
         Verifies participant authorization and returns the full live memoir details
-        including metadata, assigned chapters, and active memories with signed playback URLs.
+        including metadata, chapters, memories with signed playback URLs, and audio transcripts.
         """
         verify_active_participant(str(memoir_id), str(user_id))
 
@@ -112,15 +108,24 @@ class MemoirService:
         chapters = chapters_res.data or []
 
         memories_res = (
-    supabase_admin.table("memory")
-    .select("*, memory_media(*, media_asset(*))")
-    .eq("memoir_id", memoir_id)
-    .is_("deleted_at", "null")
-    .order("occurred_start", desc=False)   # chronological
-    .order("created_at", desc=False)       # tie-breaker for same/no date
-    .execute()
-)
+            supabase_admin.table("memory")
+            .select("*, memory_media(*, media_asset(*))")
+            .eq("memoir_id", memoir_id)
+            .is_("deleted_at", "null")
+            .order("occurred_start", desc=False)
+            .order("created_at", desc=False)
+            .execute()
+        )
         memories_raw = memories_res.data or []
+
+        # Batch-fetch transcripts for all audio assets in this memoir
+        transcripts_res = (
+            supabase_admin.table("transcript")
+            .select("*")
+            .eq("memoir_id", memoir_id)
+            .execute()
+        )
+        t_map = {str(t["media_asset_id"]): t for t in (transcripts_res.data or [])}
 
         hydrated_memories = []
         for mem in memories_raw:
@@ -137,6 +142,12 @@ class MemoirService:
                         except Exception:
                             playback_url = None
                     asset["playback_url"] = playback_url
+
+                    if asset.get("kind") == "audio":
+                        asset["transcript"] = t_map.get(str(asset.get("id")))
+                    else:
+                        asset["transcript"] = None
+
                     media_list.append(asset)
             mem["media_assets"] = media_list
             hydrated_memories.append(mem)
