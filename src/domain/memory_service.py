@@ -207,7 +207,7 @@ class MemoryService:
             if len(owned_assets) != len(to_add):
                 raise HTTPException(status_code=403, detail="Some assets do not belong to this memoir.")
             link_records = [
-                {"memory_id": memory_id, "media_asset_id": media_id, "memoir_id": memoir_id}
+                {"memory_id": str(memory_id), "media_asset_id": str(media_id), "memoir_id": str(memoir_id)}
                 for media_id in to_add
             ]
             memory_repository.insert_memory_media(link_records)
@@ -233,6 +233,17 @@ class MemoryService:
         # Normalize empty date strings to None so Postgres accepts them
         if "occurred_start" in clean_update and not clean_update["occurred_start"]:
             clean_update["occurred_start"] = None
+
+        # Pydantic v2 model_dump() returns native date/UUID objects, which
+        # json.dumps cannot serialize (supabase-py sends them as JSON).
+        # Normalize to ISO strings like the create path does.
+        from datetime import date as _date, datetime as _datetime
+        from uuid import UUID as _UUID
+        for _k, _v in list(clean_update.items()):
+            if isinstance(_v, (_date, _datetime)):
+                clean_update[_k] = _v.isoformat()
+            elif isinstance(_v, _UUID):
+                clean_update[_k] = str(_v)
 
         try:
             res = memory_repository.update_memory_record(memory_id, memoir_id, clean_update)
