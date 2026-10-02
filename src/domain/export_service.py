@@ -50,12 +50,9 @@ class ExportService:
         """Background worker method to compile data, generate PDF via xhtml2pdf, and upload to storage."""
         try:
             payload = ExportRepository.fetch_memoir_export_payload(memoir_id)
-            memoir = payload["memoir"]
-            memories = payload["memories"]
-            media_assets = payload["media_assets"]
-            transcripts = payload["transcripts"]
-
-            html_content = cls._render_memoir_html(memoir, memories, media_assets, transcripts)
+            html_content = cls._render_memoir_html(
+                payload["memoir"], payload["chapters"], payload["memories"]
+            )
 
             pdf_buffer = io.BytesIO()
             pisa_status = pisa.CreatePDF(html_content, dest=pdf_buffer)
@@ -102,49 +99,76 @@ class ExportService:
         }
 
     @staticmethod
-    def _render_memoir_html(memoir: dict, memories: list, media_assets: list, transcripts: list) -> str:
-        """Generates a high-end, printable book layout HTML string."""
-        memoir_title = _esc(memoir.get("title", "My Memoir"))
+    def _render_memoir_html(memoir: dict, chapters: list, memories: list) -> str:
+        """Book layout: cover → owner-confirmed chapters → memories with
+        small inline photos. No photo gallery, no transcripts, no audio:
+        transcripts feed the AI organizer only and audio cannot play on paper.
+        """
+        memoir_title = _esc(memoir.get("subject_name") or memoir.get("title", "My Memoir"))
         memoir_description = _esc(memoir.get("description", "A curated collection of life memories."))
 
-        memories_html = ""
-        for mem in memories:
+        def _memory_photos_html(mem: dict) -> str:
+            parts = []
+            for link in (mem.get("memory_media") or []):
+                asset = link.get("media_asset") or {}
+                if asset.get("kind") != "photo" or not asset.get("storage_key"):
+                    continue
+                img_url = storage_adapter.create_playback_url(asset.get("storage_key"))
+                if not img_url:
+                    continue
+                caption = _esc(asset.get("caption") or "")
+                parts.append(
+                    f'<div class="photo-thumb">'
+                    f'<img src="{_esc(img_url)}" alt="Memory photo" />'
+                    f'{f"<p>{caption}</p>" if caption else ""}'
+                    f"</div>"
+                )
+            if not parts:
+                return ""
+            return '<div class="photo-row">' + "".join(parts) + "</div>"
+
+        def _memory_html(mem: dict) -> str:
             title = _esc(mem.get("title") or "Untitled Entry")
             date = _esc(mem.get("occurred_start") or str(mem.get("created_at", ""))[:10])
             body = _esc(mem.get("body_text") or "")
+            return (
+                '<div class="memory-entry">'
+                f'<div class="memory-meta">{date}</div>'
+                f"<h3>{title}</h3>"
+                f'<div class="memory-body">{body.replace(chr(10), "<br/>")}</div>'
+                f"{_memory_photos_html(mem)}"
+                "</div>"
+            )
 
-            memories_html += f"""
-            <div class="memory-entry">
-                <div class="memory-meta">{date}</div>
-                <h2>{title}</h2>
-                <div class="memory-body">{body.replace(chr(10), '<br>')}</div>
-            </div>
-            """
+        by_chapter: dict[str, list] = {}
+        unassigned: list = []
+        chapter_ids = {c.get("id") for c in chapters}
+        for mem in memories:
+            cid = mem.get("chapter_id")
+            if cid and cid in chapter_ids:
+                by_chapter.setdefault(cid, []).append(mem)
+            else:
+                unassigned.append(mem)
 
-        photos_html = ""
-        for ma in media_assets:
-            if ma.get("kind") == "photo" and ma.get("storage_key"):
-                img_url = storage_adapter.create_playback_url(ma.get("storage_key"))
-                if not img_url:
-                    continue
-                caption = _esc(ma.get("caption") or "")
-                photos_html += f"""
-                <div class="photo-container">
-                    <img src="{_esc(img_url)}" alt="Memory photo" />
-                    {f'<p class="photo-caption">{caption}</p>' if caption else ''}
-                </div>
-                """
-
-        transcripts_html = ""
-        for t in transcripts:
-            t_text = _esc(t.get("display_text") or "")
-            if t_text:
-                transcripts_html += f"""
-                <div class="transcript-box">
-                    <strong>Voice Recording Transcript:</strong>
-                    <p>{t_text}</p>
-                </div>
-                """
+        chapters_html = ""
+        for ch in chapters:
+            mems = by_chapter.get(ch.get("id"), [])
+            if not mems:
+                continue
+            ch_title = _esc(ch.get("title") or "Chapter")
+            ch_summary = _esc(ch.get("summary") or "")
+            stories = "".join(_memory_html(m) for m in mems)
+            chapters_html += (
+                f'<div class="section-title">{ch_title}</div>'
+                f'{f"<p class=\"chapter-summary\">{ch_summary}</p>" if ch_summary else ""}'
+                f"{stories}"
+            )
+        if unassigned:
+            stories = "".join(_memory_html(m) for m in unassigned)
+            chapters_html += (
+                '<div class="section-title">Memoir Reflections</div>'
+                f"{stories}"
+            )
 
         return f"""
         <!DOCTYPE html>
@@ -191,15 +215,21 @@ class ExportService:
                     color: #887a64;
                     margin-bottom: 4px;
                 }}
-                h2 {{
-                    font-size: 16pt;
+                h3 {{
+                    font-size: 12pt;
                     color: #222;
-                    margin: 0 0 10px 0;
+                    margin: 0 0 8px 0;
                 }}
                 .memory-body {{
                     font-size: 10pt;
                     text-align: justify;
-                    margin-bottom: 12px;
+                    margin-bottom: 8px;
+                }}
+                .chapter-summary {{
+                    font-size: 10pt;
+                    font-style: italic;
+                    color: #555;
+                    margin-bottom: 20px;
                 }}
                 .section-title {{
                     font-size: 14pt;
@@ -209,26 +239,25 @@ class ExportService:
                     border-bottom: 2px solid #b8a894;
                     padding-bottom: 5px;
                 }}
-                .photo-container {{
-                    margin: 15px 0;
+                .photo-row {{
+                    margin: 8px 0 4px 0;
+                }}
+                .photo-thumb {{
+                    display: inline-block;
+                    vertical-align: top;
+                    width: 32%;
+                    margin: 0 1% 8px 0;
                     text-align: center;
                 }}
-                .photo-container img {{
-                    max-width: 70%;
-                    max-height: 300px;
+                .photo-thumb img {{
+                    max-width: 100%;
+                    max-height: 180px;
                 }}
-                .photo-caption {{
-                    font-size: 8pt;
+                .photo-thumb p {{
+                    font-size: 7pt;
                     font-style: italic;
                     color: #666;
-                    margin-top: 4px;
-                }}
-                .transcript-box {{
-                    background: #f4efea;
-                    border-left: 3px solid #b8a894;
-                    padding: 10px 15px;
-                    font-size: 9pt;
-                    margin-top: 15px;
+                    margin-top: 2px;
                 }}
             </style>
         </head>
@@ -238,12 +267,7 @@ class ExportService:
                 <p>{memoir_description}</p>
             </div>
             <div class="content">
-                <div class="section-title">Memories</div>
-                {memories_html}
-
-                {f'<div class="section-title">Photo Gallery</div>{photos_html}' if photos_html else ''}
-
-                {f'<div class="section-title">Voice Transcripts</div>{transcripts_html}' if transcripts_html else ''}
+                {chapters_html}
             </div>
         </body>
         </html>

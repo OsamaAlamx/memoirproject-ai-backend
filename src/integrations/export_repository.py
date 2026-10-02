@@ -50,42 +50,39 @@ class ExportRepository:
     @staticmethod
     def fetch_memoir_export_payload(memoir_id: str) -> dict:
         """
-        Fetches memoir details, memories, media assets, and audio transcripts.
-        Strictly excludes comments to ensure export represents a static keepsake archive.
+        Fetches memoir details, owner-confirmed chapters, and memories with
+        their per-memory media attached. Strictly excludes comments AND
+        transcripts: transcripts feed the AI organizer only and must never
+        appear in the exported keepsake.
         """
+        from src.integrations.media_join import attach_media_assets
+
         memoir_res = supabase_admin.table("memoir").select("*").eq("id", memoir_id).single().execute()
         memoir_data = memoir_res.data if memoir_res else {}
 
+        chapters_res = (
+            supabase_admin.table("chapter")
+            .select("id, title, summary, sort_order")
+            .eq("memoir_id", memoir_id)
+            .order("sort_order", desc=False)
+            .execute()
+        )
+        chapters = chapters_res.data if chapters_res.data else []
+
         memories_res = (
             supabase_admin.table("memory")
-            .select("id, title, body_text, occurred_start, created_at")
+            .select("id, title, body_text, occurred_start, created_at, chapter_id, position_in_chapter")
             .eq("memoir_id", memoir_id)
+            .is_("deleted_at", "null")
             .order("occurred_start", desc=False)
             .execute()
         )
-        memories = memories_res.data if memories_res.data else []
-
-        media_res = (
-            supabase_admin.table("media_asset")
-            .select("id, memoir_id, storage_key, caption, kind")
-            .eq("memoir_id", memoir_id)
-            .execute()
-        )
-        media_assets = media_res.data if media_res.data else []
-
-        transcripts_res = (
-            supabase_admin.table("transcript")
-            .select("media_asset_id, display_text")
-            .eq("memoir_id", memoir_id)
-            .execute()
-        )
-        transcripts = transcripts_res.data if transcripts_res.data else []
+        memories = attach_media_assets(memories_res.data or [], str(memoir_id))
 
         return {
             "memoir": memoir_data,
+            "chapters": chapters,
             "memories": memories,
-            "media_assets": media_assets,
-            "transcripts": transcripts
         }
 
     @staticmethod
