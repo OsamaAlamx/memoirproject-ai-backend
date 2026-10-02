@@ -40,7 +40,22 @@ class AuthService:
                     detail="Registration failed. User object not returned."
                 )
 
-            user_id = str(user.id)
+            # Supabase never errors on duplicate signup (anti-enumeration): it
+            # returns the existing user with an empty identities list and no
+            # session. That must be a 409, not a "check your email" success.
+            # Emails are case-insensitive (auth + citext), so any casing of an
+            # existing address lands here.
+            identities = getattr(user, "identities", None)
+            if isinstance(user, dict):
+                identities = user.get("identities", identities)
+            if not identities:
+                logger.warning(f"Registration attempt for existing email: {email}")
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="This email is already registered. Please log in instead."
+                )
+
+            user_id = str(user.id) if not isinstance(user, dict) else str(user.get("id"))
 
             try:
                 auth_repository.ensure_user_account(user_id, email, full_name)
