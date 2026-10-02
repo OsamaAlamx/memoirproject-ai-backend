@@ -158,9 +158,12 @@ class ExportService:
             ch_title = _esc(ch.get("title") or "Chapter")
             ch_summary = _esc(ch.get("summary") or "")
             stories = "".join(_memory_html(m) for m in mems)
+            summary_html = ""
+            if ch_summary:
+                summary_html = '<p class="chapter-summary">' + ch_summary + "</p>"
             chapters_html += (
                 f'<div class="section-title">{ch_title}</div>'
-                f'{f"<p class=\"chapter-summary\">{ch_summary}</p>" if ch_summary else ""}'
+                f"{summary_html}"
                 f"{stories}"
             )
         if unassigned:
