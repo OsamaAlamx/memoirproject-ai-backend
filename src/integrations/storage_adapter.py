@@ -8,7 +8,12 @@ import logging
 import uuid
 from dataclasses import dataclass
 
-from fastapi import HTTPException, status
+class StorageError(RuntimeError):
+    pass
+
+class UnsupportedMediaError(ValueError):
+    pass
+
 from supabase import create_client
 
 from src.core.config import settings
@@ -55,9 +60,8 @@ def _ensure_bucket_exists():
 
 def validate_upload(mime_type: str) -> tuple[str, str]:
     if mime_type not in ALLOWED_MIME:
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="That file type isn't supported. Try a photo or a voice recording.",
+        raise UnsupportedMediaError(
+            "That file type isn't supported. Try a photo or a voice recording.",
         )
     return ALLOWED_MIME[mime_type]
 
@@ -72,9 +76,8 @@ def create_signed_upload(key: str) -> SignedUpload:
         res = _client.storage.from_(settings.supabase_media_bucket).create_signed_upload_url(key)
     except Exception as exc:
         logger.error("Signed upload URL failed key=%s: %s", key, exc)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="We couldn't start the upload just now. Please try again in a moment.",
+        raise StorageError(
+            "We couldn't start the upload just now. Please try again in a moment.",
         )
     return SignedUpload(
         path=res.get("path", key),
@@ -119,3 +122,8 @@ def remove_object(key: str) -> None:
         _client.storage.from_(settings.supabase_media_bucket).remove([key])
     except Exception as exc:
         logger.warning("Object delete failed key=%s: %s", key, exc)
+
+
+def download_object(key: str) -> bytes | None:
+    """Download raw bytes for background workers (transcription)."""
+    return _client.storage.from_(settings.supabase_media_bucket).download(key)

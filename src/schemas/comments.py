@@ -3,7 +3,7 @@
 @description Pydantic validation schemas for comment requests and responses.
 """
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 
 class CommentCreate(BaseModel):
@@ -11,7 +11,7 @@ class CommentCreate(BaseModel):
     memory_id: Optional[str] = None   # was: str (required)
     media_asset_id: Optional[str] = None
     parent_comment_id: Optional[str] = None
-    body: str
+    body: str = Field(..., min_length=1, max_length=2000)
 
 class CommentResponse(BaseModel):
     id: str

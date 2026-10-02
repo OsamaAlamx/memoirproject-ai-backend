@@ -3,37 +3,53 @@
 @description FastAPI router endpoints for comment operations.
 """
 
-from fastapi import APIRouter, Depends, Query, status, Header
-from typing import List, Optional
+from fastapi import APIRouter, Depends, Query, status
+from typing import List
 from src.schemas.comments import CommentCreate, CommentResponse
 from src.domain.comments_service import CommentsService
-from src.integrations.supabase_client import supabase_admin
-from fastapi import HTTPException, status
+from src.core.auth import get_current_user
 router = APIRouter(prefix="/api/comments", tags=["Comments"])
 
-async def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
-    """Helper to extract user_id from the incoming Bearer token."""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid authentication token.")
-    
-    token = authorization.split(" ")[1]
-    try:
-        user_res = supabase_admin.auth.get_user(token)
-        if not user_res or not user_res.user:
-            raise HTTPException(status_code=401, detail="Invalid session or token expired.")
-        return user_res.user.id
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
-
 @router.get("/", response_model=List[CommentResponse])
-async def list_comments(memory_id: str = Query(..., description="The UUID of the memory item")):
+async def list_comments(
+    memory_id: str = Query(..., description="The UUID of the memory item"),
+    current_user: dict = Depends(get_current_user),
+):
     """Fetch all comments linked to a specific memory asset."""
     return await CommentsService.get_memory_comments(memory_id)
 
 @router.post("/", response_model=CommentResponse, status_code=status.HTTP_201_CREATED)
 async def post_comment(
     payload: CommentCreate,
-    user_id: str = Depends(get_current_user_id)
+    current_user: dict = Depends(get_current_user)
 ):
     """Post a new comment to a memory item with automatic participant resolution."""
-    return await CommentsService.create_new_comment(payload.dict(), user_id)
+    user_id = str(current_user.get("user_id") or current_user.get("id") or current_user.get("sub"))
+    return await CommentsService.create_new_comment(payload.model_dump(), user_id)
+
+@router.get("/pending", response_model=List[CommentResponse])
+async def list_pending_comments(
+    memoir_id: str = Query(..., description="The UUID of the memoir"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Owner-only: guest comments awaiting approval."""
+    user_id = str(current_user.get("user_id") or current_user.get("id") or current_user.get("sub"))
+    return await CommentsService.get_pending_for_owner(memoir_id, user_id)
+
+@router.patch("/{comment_id}/approve", response_model=CommentResponse)
+async def approve_comment(
+    comment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Owner-only: approve a pending comment so readers can see it."""
+    user_id = str(current_user.get("user_id") or current_user.get("id") or current_user.get("sub"))
+    return await CommentsService.approve_for_owner(comment_id, user_id)
+
+@router.delete("/{comment_id}")
+async def reject_comment(
+    comment_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Owner-only reject: permanently deletes the comment."""
+    user_id = str(current_user.get("user_id") or current_user.get("id") or current_user.get("sub"))
+    return {"success": True, "data": await CommentsService.reject_for_owner(comment_id, user_id)}

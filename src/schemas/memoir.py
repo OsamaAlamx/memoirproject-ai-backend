@@ -46,3 +46,14 @@ class MemoirResponseEnvelope(BaseModel):
     success: bool = True
     message: str = "Operation successful"
     data: MemoirResponseData
+
+
+class MemoirPublicationRequest(BaseModel):
+    publish: bool = Field(..., description="True to go live, False to take down.")
+
+
+class MemoirSettingsRequest(BaseModel):
+    comment_policy: Optional[Literal["nobody", "invited_only", "anyone_who_can_view"]] = Field(
+        None, description="Who may comment on the shared memoir.")
+    visibility: Optional[Literal["invited_only", "link_with_password", "link_public"]] = Field(
+        None, description="Who may open the shared memoir.")

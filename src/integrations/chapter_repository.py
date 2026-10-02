@@ -7,14 +7,14 @@ def get_memories_for_organization(memoir_id: str):
     """
     res = supabase_admin.table("memory")\
         .select(
-            "id, title, body_text, occurred_start, chapter_id, position_in_chapter, "
-            "memory_media(media_asset(id, kind, caption))"
+            "id, title, body_text, occurred_start, chapter_id, position_in_chapter"
         )\
         .eq("memoir_id", memoir_id)\
         .is_("deleted_at", "null")\
         .execute()
 
-    memories = res.data or []
+    from src.integrations.media_join import attach_media_assets
+    memories = attach_media_assets(res.data or [], memoir_id)
 
     # Fetch transcripts for this memoir to inject audio content into AI context
     transcripts_res = supabase_admin.table("transcript")\

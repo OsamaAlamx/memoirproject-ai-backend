@@ -32,6 +32,22 @@ class Settings(BaseSettings):
         default=["http://localhost:3000", "http://127.0.0.1:3000"],
         validation_alias="CORS_ORIGINS"
     )
+    frontend_url: str = Field(
+        "http://localhost:3000", validation_alias="FRONTEND_URL"
+    )
+    share_link_base_url: str = Field(
+        "http://localhost:3000/live", validation_alias="SHARE_LINK_BASE_URL"
+    )
+
+    @field_validator("share_link_base_url", mode="before")
+    @classmethod
+    def normalize_share_link_base_url(cls, v: str) -> str:
+        # The only public reader route is /live/[token]. A base URL ending in
+        # /share produces links that 404, so fail fast instead of issuing them.
+        base = str(v or "").strip().rstrip("/")
+        if not base.endswith("/live"):
+            raise ValueError("SHARE_LINK_BASE_URL must end with /live (public reader route).")
+        return base
 
     @field_validator("cors_origins", mode="before")
     @classmethod

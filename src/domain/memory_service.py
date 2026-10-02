@@ -8,10 +8,25 @@ fully decoupled from direct database infrastructure calls.
 from fastapi import HTTPException, status
 from src.schemas.memory import MemoryCreateRequest
 from src.integrations import memory_repository
+from src.integrations import memoir_repository
 from src.domain.authorization import verify_active_participant
 from src.integrations import storage_adapter
 from src.domain.transcription_service import transcribe_and_store_audio
-from src.integrations.supabase_client import supabase
+
+
+def _ensure_memoir_editable(memoir_id: str) -> None:
+    """Published memoirs are frozen: no new memories, edits, or deletes.
+
+    The live link serves a fixed book, so owner writes must stop with a
+    clear 403 instead of mutating the published archive.
+    """
+    memoir = memoir_repository.fetch_memoir_record(str(memoir_id))
+    if memoir and memoir.get("status") == "published":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Memoir is published and no longer accepts new memories or edits. "
+            "Unpublish it to make changes.",
+        )
 
 
 class MemoryService:
@@ -26,6 +41,8 @@ class MemoryService:
             required_roles=["owner", "admin", "contributor"]
         )
         participant_id = participant["id"]
+
+        _ensure_memoir_editable(str(payload.memoir_id))
 
         memory_data = {
             "memoir_id": str(payload.memoir_id),
@@ -134,8 +151,7 @@ class MemoryService:
                     if asset.get("kind") == "audio":
                         asset_id = asset.get("id")
                         try:
-                            transcript_res = supabase.table("transcript").select("*").eq("media_asset_id", asset_id).maybe_single().execute()
-                            asset["transcript"] = transcript_res.data if transcript_res and transcript_res.data else None
+                            asset["transcript"] = memory_repository.fetch_transcript_by_asset(asset_id)
                         except Exception:
                             asset["transcript"] = None
                     else:
@@ -160,6 +176,8 @@ class MemoryService:
 
         row = mem_res.data[0]
         memoir_id = row["memoir_id"]
+
+        _ensure_memoir_editable(memoir_id)
 
         participant_res = memory_repository.fetch_participant(memoir_id, user_id)
         if not participant_res.data:
@@ -236,6 +254,7 @@ class MemoryService:
 
     @classmethod
     def delete_memory(cls, memoir_id: str, memory_id: str, user_id: str) -> dict:
+        _ensure_memoir_editable(memoir_id)
         participant_res = memory_repository.fetch_participant(memoir_id, user_id)
         if not participant_res.data:
             raise HTTPException(

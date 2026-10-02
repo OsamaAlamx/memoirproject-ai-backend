@@ -1,44 +1,29 @@
-from typing import Dict, Any
-from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, status
 
-from src.core.config import settings
 from src.core.auth import get_current_user
-from src.domain.share_service import ShareService
-from src.integrations.share_repository import ShareRepository
+from src.domain.share_service import ShareService, to_link_response
 from src.schemas.share import (
-    ShareLinkResponse, ShareLinkResponseEnvelope, ShareLinkUpdateRequest, SharedMemoirResponseEnvelope
+    ShareLinkResponseEnvelope, ShareLinkUpdateRequest, SharedMemoirResponseEnvelope,
+    ReaderJoinRequest, ReaderJoinResponseEnvelope, ReaderExportRequest,
+    GuestCommentCreate, GuestCommentResponseEnvelope, GuestCommentListEnvelope,
+    ReactionToggleRequest, ReactionToggleResponseEnvelope, ReactionSummaryResponseEnvelope,
 )
 
 owner_router = APIRouter(prefix="/api/memoirs", tags=["Share Links"])
 reader_router = APIRouter(prefix="/api/share", tags=["Shared Memoirs"])
-
-def _to_link_response(link: Dict[str, Any]) -> ShareLinkResponse:
-    return ShareLinkResponse(
-        id=str(link["id"]),
-        memoir_id=str(link["memoir_id"]),
-        scope=link["scope"],
-        token=link["token"],
-        url=f"{settings.share_link_base_url.rstrip('/')}/{link['token']}",
-        created_by_participant_id=str(link["created_by_participant_id"]) if link.get("created_by_participant_id") else None,
-        created_at=link["created_at"],
-        expires_at=link.get("expires_at"),
-        revoked_at=link.get("revoked_at"),
-        open_count=link.get("open_count", 0)
-    )
 
 # --- OWNER ROUTES ---
 @owner_router.post("/{memoir_id}/share-link", status_code=201, response_model=ShareLinkResponseEnvelope)
 async def create_share_link(memoir_id: str, current_user: dict = Depends(get_current_user)):
     user_id = str(current_user.get("user_id") or current_user.get("id") or current_user.get("sub"))
     link = await ShareService.create_or_get_share_link(memoir_id, user_id)
-    return {"success": True, "message": "Share link ready.", "data": _to_link_response(link)}
+    return {"success": True, "message": "Share link ready.", "data": to_link_response(link)}
 
 @owner_router.patch("/{memoir_id}/share-link", response_model=ShareLinkResponseEnvelope)
 async def patch_share_link(memoir_id: str, payload: ShareLinkUpdateRequest, current_user: dict = Depends(get_current_user)):
     user_id = str(current_user.get("user_id") or current_user.get("id") or current_user.get("sub"))
     link = await ShareService.update_share_link(memoir_id, user_id, payload)
-    return {"success": True, "message": "Share link updated.", "data": _to_link_response(link)}
+    return {"success": True, "message": "Share link updated.", "data": to_link_response(link)}
 
 @owner_router.delete("/{memoir_id}/share-link", status_code=200)
 async def delete_share_link(memoir_id: str, current_user: dict = Depends(get_current_user)):
@@ -49,29 +34,46 @@ async def delete_share_link(memoir_id: str, current_user: dict = Depends(get_cur
 # --- READER ROUTE (Replaces the need for a separate deps_share.py) ---
 @reader_router.get("/{token}", response_model=SharedMemoirResponseEnvelope)
 async def read_shared_memoir(token: str):
-    link = await ShareRepository.get_link_by_token(token)
-    
-    # Check if link exists, is revoked, or is expired
-    if not link or link.get("revoked_at"):
-        raise HTTPException(status_code=404, detail="Not found.")
-    
-    if link.get("expires_at"):
-        expires_at = datetime.fromisoformat(link["expires_at"].replace("Z", "+00:00"))
-        if datetime.now(timezone.utc) > expires_at:
-            raise HTTPException(status_code=404, detail="Link expired.")
-
-    memoir = await ShareRepository.get_memoir_by_id(link["memoir_id"])
-    if not memoir or memoir.get("status") != "published":
-        raise HTTPException(status_code=404, detail="Not found.")
-
-    # Increment the open count in the background
-    await ShareRepository.increment_open_count(link["id"], link.get("open_count", 0))
-
-    memories = await ShareRepository.get_shared_memoir_view(link["memoir_id"])
-    
-    data = {
-        **memoir,
-        "can_comment": memoir.get("comment_policy") == "public",
-        "memories": memories
-    }
+    data = await ShareService.read_shared_memoir(token)
     return {"success": True, "message": "Operation successful", "data": data}
+
+@reader_router.post("/{token}/join", response_model=ReaderJoinResponseEnvelope)
+async def join_shared_memoir(token: str, payload: ReaderJoinRequest):
+    data = await ShareService.join_reader(token, payload.display_name)
+    return {"success": True, "message": "Welcome.", "data": data}
+
+@reader_router.get("/{token}/comments", response_model=GuestCommentListEnvelope)
+async def list_shared_comments(token: str, memory_id: str | None = None):
+    data = await ShareService.list_guest_comments(token, memory_id)
+    return {"success": True, "message": "Operation successful", "data": data}
+
+@reader_router.post("/{token}/comments", response_model=GuestCommentResponseEnvelope, status_code=status.HTTP_201_CREATED)
+async def post_shared_comment(token: str, payload: GuestCommentCreate):
+    data = await ShareService.post_guest_comment(token, payload.model_dump())
+    return {"success": True, "message": "Comment sent for owner approval.", "data": data}
+
+@reader_router.get("/{token}/reactions", response_model=ReactionSummaryResponseEnvelope)
+async def list_shared_reactions(token: str, participant_id: str | None = None):
+    data = await ShareService.get_reactions(token, participant_id)
+    return {"success": True, "message": "Operation successful", "data": data}
+
+@reader_router.post("/{token}/reactions", response_model=ReactionToggleResponseEnvelope)
+async def post_shared_reaction(token: str, payload: ReactionToggleRequest):
+    data = await ShareService.post_reaction(token, payload.model_dump())
+    return {"success": True, "message": "Operation successful", "data": data}
+
+@reader_router.post("/{token}/export", status_code=status.HTTP_202_ACCEPTED)
+async def request_reader_export(token: str, payload: ReaderExportRequest, background_tasks: BackgroundTasks):
+    """Reader PDF export for the single live link (images + text only).
+
+    No JWT — the live token plus the joined reader participant_id is the
+    credential. Reuses the owner export pipeline, whose payload builder
+    strictly excludes comments/reactions.
+    """
+    job_info = await ShareService.initiate_reader_export(token, payload.participant_id, background_tasks)
+    return {"success": True, "data": job_info}
+
+@reader_router.get("/{token}/export/latest")
+async def get_reader_export_status(token: str):
+    """Latest export status for this live link (poll until ready, then download)."""
+    return await ShareService.get_reader_export_status(token)

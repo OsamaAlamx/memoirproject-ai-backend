@@ -7,6 +7,7 @@ fully decoupled from direct infrastructure calls and secured against path traver
 
 from fastapi import HTTPException, status
 from src.integrations import media_repository
+from src.integrations import memoir_repository
 from src.integrations import storage_adapter
 from src.schemas.media import PresignedUrlRequest, MediaMetadataRequest
 from src.domain.authorization import verify_active_participant
@@ -15,9 +16,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 from src.core.config import (
-    STORAGE_TIER_HOT, 
-    TRANSCRIPTION_STATUS_PENDING
+    STORAGE_TIER_HOT,
+    TRANSCRIPTION_STATUS_PENDING,
+    settings,
 )
+
+# Caps transcription/AI cost from very long recordings.
+MAX_AUDIO_VIDEO_DURATION_MS = 6 * 60 * 60 * 1000
 
 
 class MediaService:
@@ -52,8 +57,23 @@ class MediaService:
             required_roles=["owner", "admin", "contributor"]
         )
 
+        # Published memoirs are frozen — no new uploads into the live book.
+        memoir = memoir_repository.fetch_memoir_record(str(memoir_id))
+        if memoir and memoir.get("status") == "published":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Memoir is published and no longer accepts new media. "
+                "Unpublish it to make changes.",
+            )
+
         # Enforce file size and type validation via the storage adapter
-        media_type, extension = storage_adapter.validate_upload(payload.mime_type)
+        try:
+            media_type, extension = storage_adapter.validate_upload(payload.mime_type)
+        except storage_adapter.UnsupportedMediaError as e:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail=str(e),
+            )
         
         # SECURITY FIX: Prevent path traversal by generating a secure UUID-based path key 
         # instead of trusting raw user filenames.
@@ -61,12 +81,12 @@ class MediaService:
 
         try:
             upload_res = storage_adapter.create_signed_upload(storage_path)
+        except storage_adapter.StorageError as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(e)
+            )
         except Exception as e:
-            # 🔍 ADD THIS PRINT STATEMENT TO SEE THE REAL ERROR IN YOUR TERMINAL
-            import traceback
-            traceback.print_exc()
-            print(f"STORAGE ERROR DETAILED: {repr(e)}")
-            
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to generate signed upload URL: {str(e)}"
@@ -95,6 +115,15 @@ class MediaService:
         )
         participant_id = participant["id"]
 
+        # Published memoirs are frozen — no new media records into the live book.
+        memoir = memoir_repository.fetch_memoir_record(str(memoir_id))
+        if memoir and memoir.get("status") == "published":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Memoir is published and no longer accepts new media. "
+                "Unpublish it to make changes.",
+            )
+
         # SECURITY FIX: Enforce tenant isolation — ensure the storage key explicitly belongs 
         # to this memoir ID to prevent cross-tenant asset hijacking.
         expected_prefix = f"memoirs/{memoir_id}/"
@@ -110,13 +139,32 @@ class MediaService:
                 logger.warning(f"Storage index lag detected for key: {payload.storage_key}. Proceeding with metadata save.")
         except Exception as exc:
             logger.warning(f"Could not verify file existence due to error: {exc}")
-            
+            file_size = None
+
+        # Enforce server-side size cap (MEDIA_MAX_BYTES) on claimed and actual size.
+        if payload.byte_size > settings.media_max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=f"File too large. Maximum is {settings.media_max_bytes} bytes.",
+            )
+        if file_size and file_size > settings.media_max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=f"File too large. Maximum is {settings.media_max_bytes} bytes.",
+            )
+
         # 2. KIND-SPECIFIC VALIDATION: Ensure audio and video assets provide a valid duration
         if payload.kind in ["audio", "video"] and (payload.duration_ms is None):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Audio and video assets require a valid positive duration_ms."
             )
+        if payload.kind in ["audio", "video"] and payload.duration_ms is not None:
+            if payload.duration_ms <= 0 or payload.duration_ms > MAX_AUDIO_VIDEO_DURATION_MS:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Audio/video duration out of allowed range (max 6 hours).",
+                )
 
         # IDEMPOTENCY CHECK: Prevent duplicate media asset records if a request is retried
         if payload.checksum_sha256:

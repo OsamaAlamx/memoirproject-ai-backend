@@ -38,3 +38,12 @@ class MemoryCreateRequest(BaseModel):
     media_asset_ids: Optional[List[uuid.UUID]] = Field(
         default_factory=list, description="List of media asset UUIDs linked to this memory"
     )
+
+class MemoryUpdateRequest(BaseModel):
+    """Validation schema for patching a memory's editable fields."""
+    model_config = {"extra": "forbid"}
+    title: Optional[str] = Field(None, max_length=255)
+    body_text: Optional[str] = Field(None, max_length=10000)
+    occurred_start: Optional[date] = None
+    media_asset_ids_to_add: Optional[List[uuid.UUID]] = None
+    media_asset_ids_to_remove: Optional[List[uuid.UUID]] = None

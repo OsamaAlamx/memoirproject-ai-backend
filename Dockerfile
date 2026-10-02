@@ -1,5 +1,3 @@
-# Example Dockerfile showing how this backend would be containerized.
-
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -9,4 +7,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Render injects $PORT (default 10000). --proxy-headers trusts Render's proxy.
+CMD ["sh", "-c", "uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers"]

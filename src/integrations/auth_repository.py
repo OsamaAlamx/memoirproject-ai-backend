@@ -5,6 +5,7 @@ sign-up/sign-in flows and user account profile table synchronization.
 """
 
 from src.integrations.supabase_client import supabase
+from src.core.config import settings
 
 
 def auth_sign_up(email: str, password: str, full_name: str):
@@ -23,7 +24,7 @@ def auth_sign_up(email: str, password: str, full_name: str):
         "email": email,
         "password": password,
         "options": {
-            "email_redirect_to": "http://localhost:3000/login",
+            "email_redirect_to": f"{settings.frontend_url.rstrip('/')}/login",
             "data": {
                 "full_name": full_name
             }

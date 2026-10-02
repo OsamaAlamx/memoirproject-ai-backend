@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from src.integrations import auth_repository, memoir_repository
 from src.schemas.auth import UserRegisterRequest, UserLoginRequest
-from src.integrations.supabase_client import supabase
 
 logger = logging.getLogger(__name__)
 
@@ -123,9 +122,18 @@ class AuthService:
         except Exception as m_err:
             logger.warning("Failed to fetch active memoir during login: %s", str(m_err))
 
+        full_name = None
+        try:
+            user_res = memoir_repository.fetch_user_account(user_id)
+            user_record = user_res.data[0] if user_res and user_res.data else {}
+            full_name = user_record.get("full_name")
+        except Exception as u_err:
+            logger.warning("Failed to fetch user profile during login: %s", str(u_err))
+
         return {
             "user_id": user_id,
             "email": response.user.email,
+            "full_name": full_name,
             "access_token": access_token,
             "active_memoir": active_memoir,
             "message": "Login successful."

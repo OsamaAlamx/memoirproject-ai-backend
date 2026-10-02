@@ -1,15 +1,5 @@
 """
 @file schemas/search.py
-@description Pydantic schemas for full-text search validation and response payloads.
+@description Full-text search endpoints return plain dicts validated client-side
+(features/search/schemas.ts); no Pydantic models are currently needed here.
 """
-
-from pydantic import BaseModel, Field
-import uuid
-
-class SearchQueryResponseItem(BaseModel):
-    id: str
-    memoir_id: str
-    title: str | None = None
-    body_text: str | None = None
-    matched_content_type: str  # e.g., 'memory', 'transcript', 'caption'
-    relevance_score: float | None = None

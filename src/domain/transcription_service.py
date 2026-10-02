@@ -2,7 +2,7 @@ import os
 import time
 import assemblyai as aai
 from src.integrations.memory_repository import upsert_transcript_record
-from src.integrations.supabase_client import supabase_admin
+from src.integrations import storage_adapter
 from src.core.config import settings
 
 def transcribe_and_store_audio(media_asset_id: str, memoir_id: str, storage_key: str):
@@ -25,7 +25,7 @@ def transcribe_and_store_audio(media_asset_id: str, memoir_id: str, storage_key:
         print(f"Attempting to download storage key '{storage_key}' from bucket '{bucket_name}'...")
         for attempt in range(1, 4):
             try:
-                audio_bytes = supabase_admin.storage.from_(bucket_name).download(storage_key)
+                audio_bytes = storage_adapter.download_object(storage_key)
                 if audio_bytes:
                     print(f"Successfully downloaded audio bytes on attempt {attempt}")
                     break
@@ -65,3 +65,13 @@ def transcribe_and_store_audio(media_asset_id: str, memoir_id: str, storage_key:
     except Exception as e:
         print(f"CRITICAL TRANSCRIPTION EXCEPTION CAUGHT: {str(e)}")
         raise e
+
+
+def queue_transcription(background_tasks, media_asset_id: str, memoir_id: str, storage_key: str) -> None:
+    """Queue AssemblyAI transcription so routers stay thin (no try/except in api/)."""
+    background_tasks.add_task(
+        transcribe_and_store_audio,
+        media_asset_id=media_asset_id,
+        memoir_id=memoir_id,
+        storage_key=storage_key,
+    )

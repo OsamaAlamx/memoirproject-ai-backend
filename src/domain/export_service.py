@@ -14,7 +14,7 @@ from src.integrations import storage_adapter
 class ExportService:
 
     @classmethod
-    def initiate_export(cls, memoir_id: str, user_id: str) -> dict:
+    def initiate_export(cls, memoir_id: str, user_id: str, background_tasks=None) -> dict:
         """Validates permissions and queues a new PDF export job."""
         participant = verify_active_participant(
             memoir_id,
@@ -23,6 +23,14 @@ class ExportService:
         )
         participant_id = participant.get("id")
         job = ExportRepository.create_export_job(memoir_id, participant_id, kind="pdf")
+
+        if background_tasks is not None:
+            # Queue background generation here so routers stay thin.
+            background_tasks.add_task(
+                cls.process_export_background,
+                export_id=job["id"],
+                memoir_id=memoir_id,
+            )
 
         return {
             "export_id": job["id"],
@@ -68,6 +76,24 @@ class ExportService:
                 status="failed",
                 error_message=str(e)
             )
+
+    @classmethod
+    def get_latest_export_status(cls, memoir_id: str) -> dict:
+        """Fetches the latest export job status and signed download URL if ready."""
+        job = ExportRepository.get_latest_export(memoir_id)
+        if not job:
+            return {"status": "none"}
+
+        download_url = None
+        if job["status"] == "ready" and job.get("storage_key"):
+            download_url = ExportRepository.get_signed_download_url(job["storage_key"])
+
+        return {
+            "success": True,
+            "status": job["status"],
+            "error_message": job.get("error_message"),
+            "download_url": download_url,
+        }
 
     @staticmethod
     def _render_memoir_html(memoir: dict, memories: list, media_assets: list, transcripts: list) -> str:

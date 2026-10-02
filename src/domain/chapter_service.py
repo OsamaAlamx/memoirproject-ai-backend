@@ -4,11 +4,28 @@ import os
 import httpx
 from fastapi import HTTPException
 from src.core.config import settings
+from src.integrations import memoir_repository
 from src.integrations.chapter_repository import (
     get_memories_for_organization,
     get_existing_chapters,
     apply_chapters_to_db,
 )
+
+
+def _ensure_memoir_editable(memoir_id: str) -> None:
+    """AI Organizer is locked once the memoir is published.
+
+    Publishing freezes the chapter layout served on the single live link,
+    so propose/refine/apply must stop serving published memoirs (403)
+    instead of silently rewriting the live book.
+    """
+    memoir = memoir_repository.fetch_memoir_record(str(memoir_id))
+    if memoir and memoir.get("status") == "published":
+        raise HTTPException(
+            status_code=403,
+            detail="Memoir is published and can no longer be reorganized. "
+            "Unpublish it to organize chapters again.",
+        )
 
 
 class MCPServer:
@@ -50,7 +67,6 @@ def _call_llm_json(prompt: str, max_tokens: int = 8000) -> dict | None:
 
     candidate_models = [
         settings.llm_model,
-        "llama-3.3-70b-versatile",
         "openai/gpt-oss-120b",
         "meta-llama/llama-4-scout-17b-16e-instruct",
         "qwen/qwen3-32b",
@@ -377,6 +393,7 @@ class ReviewerAgent:
 class ChapterService:
     @staticmethod
     def generate_proposal(memoir_id: str):
+        _ensure_memoir_editable(memoir_id)
         server = MCPServer(memoir_id)
         client = MCPClient(server)
 
@@ -386,6 +403,7 @@ class ChapterService:
 
     @staticmethod
     def refine_proposal(memoir_id: str, current_proposal: dict, user_prompt: str):
+        _ensure_memoir_editable(memoir_id)
         server = MCPServer(memoir_id)
         client = MCPClient(server)
 
@@ -394,6 +412,7 @@ class ChapterService:
 
     @staticmethod
     def apply_proposal(memoir_id: str, proposal: dict):
+        _ensure_memoir_editable(memoir_id)
         if "chapters" not in proposal:
             raise HTTPException(status_code=400, detail="Invalid proposal structure.")
         apply_chapters_to_db(memoir_id, proposal["chapters"])

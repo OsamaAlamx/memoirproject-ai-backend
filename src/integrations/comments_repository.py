@@ -4,8 +4,13 @@
 """
 
 from typing import List, Dict, Any
-from fastapi import HTTPException, status
 from src.integrations.supabase_client import supabase_admin
+
+class RepositoryError(RuntimeError):
+    pass
+
+class NotParticipantError(PermissionError):
+    pass
 
 class CommentsRepository:
 
@@ -32,11 +37,84 @@ class CommentsRepository:
             return formatted_comments
 
         except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Database error while fetching comments: {str(e)}"
+            raise RepositoryError(
+                f"Database error while fetching comments: {str(e)}"
             )
                     
+    @staticmethod
+    async def get_pending_comments(memoir_id: str) -> List[Dict[str, Any]]:
+        """Guest comments awaiting owner approval (hidden, not withdrawn)."""
+        try:
+            response = supabase_admin.table("comment")\
+                .select("*")\
+                .eq("memoir_id", memoir_id)\
+                .is_("deleted_at", "null")\
+                .not_.is_("hidden_at", "null")\
+                .order("created_at", desc=False)\
+                .execute()
+            rows = response.data or []
+            author_ids = list({r.get("author_participant_id") for r in rows if r.get("author_participant_id")})
+            names: Dict[str, str] = {}
+            if author_ids:
+                pres = supabase_admin.table("memoir_participant")\
+                    .select("id, display_name")\
+                    .in_("id", author_ids)\
+                    .execute()
+                names = {p["id"]: p.get("display_name", "Reader") for p in (pres.data or [])}
+            out = []
+            for item in rows:
+                record = {**item}
+                record["author_name"] = names.get(item.get("author_participant_id"), "Reader")
+                out.append(record)
+            return out
+        except Exception as e:
+            raise RepositoryError(f"Database error while fetching pending comments: {str(e)}")
+
+    @staticmethod
+    async def approve_comment(comment_id: str) -> Dict[str, Any]:
+        try:
+            res = supabase_admin.table("comment")\
+                .update({"hidden_at": None, "hidden_by_participant_id": None})\
+                .eq("id", comment_id)\
+                .execute()
+            if not res.data:
+                raise RepositoryError("Comment not found.")
+            row = res.data[0]
+            author_name = "Reader"
+            if row.get("author_participant_id"):
+                pres = supabase_admin.table("memoir_participant")\
+                    .select("display_name")\
+                    .eq("id", row["author_participant_id"])\
+                    .execute()
+                if pres.data:
+                    author_name = pres.data[0].get("display_name", "Reader")
+            return {**row, "author_name": author_name}
+        except RepositoryError:
+            raise
+        except Exception as e:
+            raise RepositoryError(f"Database error while approving comment: {str(e)}")
+
+    @staticmethod
+    async def delete_comment_hard(comment_id: str) -> Dict[str, Any]:
+        """Owner reject: permanent row delete (replies cascade per schema)."""
+        try:
+            res = supabase_admin.table("comment").delete().eq("id", comment_id).execute()
+            if not res.data:
+                raise RepositoryError("Comment not found.")
+            return {"id": comment_id}
+        except RepositoryError:
+            raise
+        except Exception as e:
+            raise RepositoryError(f"Database error while deleting comment: {str(e)}")
+
+    @staticmethod
+    async def get_comment_memoir_id(comment_id: str) -> str | None:
+        try:
+            res = supabase_admin.table("comment").select("memoir_id").eq("id", comment_id).execute()
+            return res.data[0]["memoir_id"] if res.data else None
+        except Exception as e:
+            raise RepositoryError(f"Database error while fetching comment: {str(e)}")
+
     @staticmethod
     async def insert_comment(payload: Dict[str, Any], user_id: str) -> Dict[str, Any]:
         """
@@ -55,9 +133,8 @@ class CommentsRepository:
 
             participants = participant_res.data or []
             if not participants:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="User is not an authorized participant of this memoir."
+                raise NotParticipantError(
+                    "User is not an authorized participant of this memoir."
                 )
 
             participant_id = participants[0]["id"]
@@ -80,9 +157,8 @@ class CommentsRepository:
 
             data = response.data or []
             if not data:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Failed to save comment record."
+                raise RepositoryError(
+                    "Failed to save comment record."
                 )
 
             # Grab the newly inserted record from Supabase's list response
@@ -92,10 +168,9 @@ class CommentsRepository:
             result["author_name"] = "Family Member"  # Safe fallback matching your fetch method
             return result
 
-        except HTTPException as he:
-            raise he
+        except (NotParticipantError, RepositoryError):
+            raise
         except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Error inserting comment: {str(e)}"
+            raise RepositoryError(
+                f"Error inserting comment: {str(e)}"
             )

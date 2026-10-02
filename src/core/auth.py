@@ -15,6 +15,18 @@ security = HTTPBearer()
 jwks_client = PyJWKClient(SUPABASE_JWKS_URL) if SUPABASE_JWKS_URL else None
 
 
+def get_user_id(current_user: dict | str | None) -> str:
+    """Single place that unwraps the auth dependency to a user id string."""
+    if isinstance(current_user, dict):
+        return (
+            current_user.get("user_id")
+            or current_user.get("id")
+            or current_user.get("sub")
+            or ""
+        )
+    return str(current_user or "")
+
+
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     """
     Validates the incoming Bearer JWT locally against the project's JWKS endpoint 

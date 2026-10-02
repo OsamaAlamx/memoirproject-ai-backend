@@ -36,18 +36,21 @@ def remove_memory_media(memory_id: str, memoir_id: str, media_asset_ids: list):
 
 
 def fetch_memoir_feed_records(memoir_id: str, limit: int = 20, offset: int = 0):
+    from src.integrations.media_join import attach_media_assets
     end_index = offset + limit - 1
-    return supabase_admin.table("memory") \
+    res = supabase_admin.table("memory") \
         .select(
             "id, memoir_id, author_participant_id, title, body_text, status, "
-            "occurred_start, occurred_end, occurred_precision, date_source, created_at, "
-            "memory_media(media_asset(*))"
+            "occurred_start, occurred_end, occurred_precision, date_source, created_at"
         ) \
         .eq("memoir_id", memoir_id) \
         .is_("deleted_at", "null") \
         .order("created_at", desc=True) \
         .range(offset, end_index) \
         .execute()
+    # Join media in Python: no FK embed in schema cache (PGRST200).
+    res.data = attach_media_assets(res.data or [], memoir_id)
+    return res
 
 
 def fetch_memory_by_id(memory_id: str, memoir_id: str):
@@ -118,3 +121,10 @@ def update_memory_record(memory_id: str, memoir_id: str, update_data: dict):
         .eq("id", memory_id) \
         .eq("memoir_id", memoir_id) \
         .execute()
+
+
+def fetch_transcript_by_asset(media_asset_id: str):
+    """Single transcript row for an audio asset (None when missing)."""
+    res = supabase_admin.table("transcript").select("*") \
+        .eq("media_asset_id", media_asset_id).maybe_single().execute()
+    return res.data if res and res.data else None

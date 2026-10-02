@@ -37,10 +37,7 @@ def verify_active_participant(memoir_id: str, user_id: str, required_roles: list
         )
 
     participant = res.data[0]
-    
-    # 🔍 ADD THIS LINE TO INSPECT WHAT PYTHON ACTUALLY SEES
-    print("DEBUG PARTICIPANT FETCHED FROM DB:", participant)
-    
+
     # Explicit check for removed status (just in case query soft-filter is bypassed)
     if participant.get("removed_at") is not None:
         raise HTTPException(
@@ -51,7 +48,6 @@ def verify_active_participant(memoir_id: str, user_id: str, required_roles: list
     # If specific write/admin roles are required, enforce them
     if required_roles:
         user_role = participant.get("role")
-        print(f"DEBUG USER ROLE: '{user_role}' (Type: {type(user_role)})") # Check value & type
         if user_role not in required_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

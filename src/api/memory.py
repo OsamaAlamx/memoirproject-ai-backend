@@ -3,8 +3,8 @@
 @description FastAPI router for owner memory capture, feed retrieval, edit, and pre-publication management.
 """
 
-from fastapi import APIRouter, Depends, status, Body
-from src.schemas.memory import MemoryCreateRequest
+from fastapi import APIRouter, Depends, status
+from src.schemas.memory import MemoryCreateRequest, MemoryUpdateRequest
 from src.domain.memory_service import MemoryService
 from src.core.auth import get_current_user
 
@@ -42,14 +42,14 @@ def get_memoir_feed_route(
 @router.patch("/{memory_id}", status_code=status.HTTP_200_OK)
 def update_memory_route(
     memory_id: str,
-    payload: dict = Body(...),
+    payload: MemoryUpdateRequest,
     user_session: dict = Depends(get_current_user)
 ):
     """
     Updates a memory's title, body_text, or occurred_start date.
     """
     user_id = user_session.get("user_id")
-    result = MemoryService.update_memory(memory_id, user_id, payload)
+    result = MemoryService.update_memory(memory_id, user_id, payload.model_dump(exclude_unset=True))
     return result
 
 

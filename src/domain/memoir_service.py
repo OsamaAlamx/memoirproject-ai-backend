@@ -8,12 +8,104 @@ and retrieving live memoir records with signed media URLs and audio transcripts.
 from fastapi import HTTPException, status
 from src.integrations import memoir_repository
 from src.integrations import storage_adapter
-from src.integrations.supabase_client import supabase_admin
 from src.domain.authorization import verify_active_participant
 from src.schemas.memoir import MemoirCreateRequest
 
 
 class MemoirService:
+
+    @staticmethod
+    def get_user_active_memoir(user_id: str) -> dict | None:
+        return memoir_repository.fetch_user_active_memoir(str(user_id))
+
+    @staticmethod
+    def list_user_memoirs(user_id: str) -> list[dict]:
+        return memoir_repository.fetch_user_memoirs(str(user_id))
+
+    @staticmethod
+    def set_memoir_publication(memoir_id: str, user_id: str, publish: bool) -> dict:
+        """
+        Go-live switch, owner-only. Publishing flips status/published_at so the
+        share link starts serving; unpublishing returns it to draft, which
+        makes every share token 404. Drafts never serve, even with a live link.
+        """
+        verify_active_participant(str(memoir_id), str(user_id), required_roles=["owner"])
+
+        memoir = memoir_repository.fetch_memoir_record(memoir_id)
+        if not memoir:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Memoir not found."
+            )
+
+        try:
+            updated = memoir_repository.update_memoir_publication(memoir_id, publish)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database error while updating publication: {str(e)}"
+            )
+        return {"id": memoir_id, "status": updated["status"] if updated else None}
+
+    @staticmethod
+    def set_memoir_settings(memoir_id: str, user_id: str, fields: dict) -> dict:
+        """Owner-only publication settings (comment policy, visibility)."""
+        verify_active_participant(str(memoir_id), str(user_id), required_roles=["owner"])
+
+        memoir = memoir_repository.fetch_memoir_record(memoir_id)
+        if not memoir:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Memoir not found."
+            )
+
+        allowed = {"comment_policy", "visibility"}
+        values = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not values:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Nothing to update."
+            )
+        try:
+            updated = memoir_repository.update_memoir_settings(memoir_id, values)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database error while updating settings: {str(e)}"
+            )
+        return {
+            "id": memoir_id,
+            "status": updated.get("status") if updated else None,
+            "comment_policy": updated.get("comment_policy") if updated else None,
+            "visibility": updated.get("visibility") if updated else None,
+        }
+
+    @staticmethod
+    def delete_memoir(memoir_id: str, user_id: str) -> dict:
+        """
+        Deletes a memoir owned by the user. Owner-only: contributors are on
+        hold and readers arrive via share links, so only the owner row counts.
+        The schema cascades every child table off the memoir row, so a single
+        row delete removes participants, chapters, memories, media, comments,
+        exports and notifications with it.
+        """
+        verify_active_participant(str(memoir_id), str(user_id), required_roles=["owner"])
+
+        memoir = memoir_repository.fetch_memoir_record(memoir_id)
+        if not memoir:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Memoir not found."
+            )
+
+        try:
+            memoir_repository.delete_memoir_record(memoir_id)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Database error while deleting memoir: {str(e)}"
+            )
+        return {"id": memoir_id}
 
     @staticmethod
     def create_memoir(payload: MemoirCreateRequest, user_session: dict) -> dict:
@@ -89,43 +181,20 @@ class MemoirService:
         """
         verify_active_participant(str(memoir_id), str(user_id))
 
-        memoir_res = supabase_admin.table("memoir").select("*").eq("id", memoir_id).execute()
-        if not memoir_res.data:
+        memoir = memoir_repository.fetch_memoir_record(memoir_id)
+        if not memoir:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Memoir container not found."
             )
 
-        memoir = memoir_res.data[0]
+        chapters = memoir_repository.fetch_chapters_for_memoir(memoir_id)
 
-        chapters_res = (
-            supabase_admin.table("chapter")
-            .select("*")
-            .eq("memoir_id", memoir_id)
-            .order("sort_order", desc=False)
-            .execute()
-        )
-        chapters = chapters_res.data or []
-
-        memories_res = (
-            supabase_admin.table("memory")
-            .select("*, memory_media(*, media_asset(*))")
-            .eq("memoir_id", memoir_id)
-            .is_("deleted_at", "null")
-            .order("occurred_start", desc=False)
-            .order("created_at", desc=False)
-            .execute()
-        )
-        memories_raw = memories_res.data or []
+        memories_raw = memoir_repository.fetch_memories_with_media(memoir_id)
 
         # Batch-fetch transcripts for all audio assets in this memoir
-        transcripts_res = (
-            supabase_admin.table("transcript")
-            .select("*")
-            .eq("memoir_id", memoir_id)
-            .execute()
-        )
-        t_map = {str(t["media_asset_id"]): t for t in (transcripts_res.data or [])}
+        transcripts = memoir_repository.fetch_transcripts_for_memoir(memoir_id)
+        t_map = {str(t["media_asset_id"]): t for t in (transcripts or [])}
 
         hydrated_memories = []
         for mem in memories_raw:
