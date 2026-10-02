@@ -13,18 +13,28 @@ from fastapi import HTTPException, status
 class CommentsService:
 
     @staticmethod
-    async def get_memory_comments(memory_id: str) -> List[Dict[str, Any]]:
+    async def get_memory_comments(memory_id: str, user_id: str) -> List[Dict[str, Any]]:
         if not memory_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Memory ID is required."
             )
         try:
+            # Resolve memoir for authz before returning any rows (no existence oracle).
+            memoir_id = await CommentsRepository.get_memory_memoir_id(memory_id)
+            if not memoir_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Comments not found."
+                )
+            verify_active_participant(str(memoir_id), str(user_id))
             return await CommentsRepository.get_comments_by_memory_id(memory_id)
-        except RepositoryError as e:
+        except HTTPException:
+            raise
+        except RepositoryError:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=str(e),
+                detail="Could not load comments.",
             )
 
     @staticmethod
@@ -60,8 +70,8 @@ class CommentsService:
         verify_active_participant(str(memoir_id), str(user_id), required_roles=["owner"])
         try:
             return await CommentsRepository.get_pending_comments(str(memoir_id))
-        except RepositoryError as e:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        except RepositoryError:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not load comments.")
 
     @staticmethod
     async def approve_for_owner(comment_id: str, user_id: str) -> Dict[str, Any]:

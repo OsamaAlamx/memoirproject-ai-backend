@@ -3,7 +3,7 @@
 @description FastAPI router for owner memory capture, feed retrieval, edit, and pre-publication management.
 """
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from src.schemas.memory import MemoryCreateRequest, MemoryUpdateRequest
 from src.domain.memory_service import MemoryService
 from src.core.auth import get_current_user
@@ -30,8 +30,8 @@ def create_memory(
 @router.get("/feed/{memoir_id}", status_code=status.HTTP_200_OK)
 def get_memoir_feed_route(
     memoir_id: str,
-    limit: int = 20,
-    offset: int = 0,
+    limit: int = Query(default=20, ge=1, le=50),
+    offset: int = Query(default=0, ge=0, le=10000),
     user_session: dict = Depends(get_current_user)
 ):
     user_id = user_session.get("user_id")

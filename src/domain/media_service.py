@@ -67,12 +67,27 @@ class MediaService:
             )
 
         # Enforce file size and type validation via the storage adapter
+        if payload.byte_size > settings.media_max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="File too large.",
+            )
         try:
             media_type, extension = storage_adapter.validate_upload(payload.mime_type)
         except storage_adapter.UnsupportedMediaError as e:
             raise HTTPException(
                 status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
                 detail=str(e),
+            )
+        # mime <-> kind cross-check (client claims kind separately)
+        from src.schemas.media import MIME_TO_KIND
+        expected_kind = MIME_TO_KIND.get(payload.mime_type)
+        if expected_kind and payload.kind != expected_kind and not (
+            payload.kind == "video" and expected_kind == "audio"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail="File type does not match media kind.",
             )
         
         # SECURITY FIX: Prevent path traversal by generating a secure UUID-based path key 

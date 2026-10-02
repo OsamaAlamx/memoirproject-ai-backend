@@ -14,6 +14,27 @@ from src.integrations import storage_adapter
 from src.domain.transcription_service import transcribe_and_store_audio
 
 
+def _transcribe_in_background(media_id: str, memoir_id: str, storage_key: str) -> None:
+    """Fire-and-forget transcription so memory submit returns fast.
+
+    AssemblyAI can take 10s+. Blocking the request on it caused the
+    slow-submission + timeout reports. Transcript fills in on next feed load.
+    """
+    import threading
+
+    def _run() -> None:
+        try:
+            transcribe_and_store_audio(
+                media_asset_id=str(media_id),
+                memoir_id=str(memoir_id),
+                storage_key=storage_key,
+            )
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _ensure_memoir_editable(memoir_id: str) -> None:
     """Published memoirs are frozen: no new memories, edits, or deletes.
 
@@ -58,10 +79,10 @@ class MemoryService:
 
         try:
             mem_res = memory_repository.insert_memory(memory_data)
-        except Exception as e:
+        except Exception:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Database error while creating memory: {str(e)}"
+                detail="Database error while creating memory."
             )
 
         if not mem_res or not mem_res.data:
@@ -106,14 +127,7 @@ class MemoryService:
                 if asset_record and asset_record.get("kind") == "audio":
                     storage_key = asset_record.get("storage_key")
                     if storage_key:
-                        try:
-                            transcribe_and_store_audio(
-                                media_asset_id=str(media_id),
-                                memoir_id=str(payload.memoir_id),
-                                storage_key=storage_key
-                            )
-                        except Exception:
-                            pass
+                        _transcribe_in_background(str(media_id), str(payload.memoir_id), storage_key)
 
         return new_memory
 
@@ -123,10 +137,10 @@ class MemoryService:
 
         try:
             res = memory_repository.fetch_memoir_feed_records(str(memoir_id), limit, offset)
-        except Exception as e:
+        except Exception:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to fetch memoir feed: {str(e)}"
+                detail="Failed to fetch memoir feed."
             )
 
         memories = res.data if res and res.data else []
@@ -212,16 +226,13 @@ class MemoryService:
             ]
             memory_repository.insert_memory_media(link_records)
             
-            # Automatically transcribe any newly attached audio
+            # Automatically transcribe any newly attached audio (background: don't block save)
             for media_id in to_add:
                 asset_record = memory_repository.fetch_media_asset_record(str(media_id))
                 if asset_record and asset_record.get("kind") == "audio":
                     storage_key = asset_record.get("storage_key")
                     if storage_key:
-                        try:
-                            transcribe_and_store_audio(str(media_id), memoir_id, storage_key)
-                        except Exception:
-                            pass
+                        _transcribe_in_background(str(media_id), memoir_id, storage_key)
 
         # Handle Standard Fields
         allowed_fields = {"title", "body_text", "occurred_start"}
@@ -247,10 +258,10 @@ class MemoryService:
 
         try:
             res = memory_repository.update_memory_record(memory_id, memoir_id, clean_update)
-        except Exception as e:
+        except Exception:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to update memory: {str(e)}"
+                detail="Failed to update memory."
             )
 
         return {"success": True, "data": res.data[0] if res.data else {}}
@@ -304,10 +315,10 @@ class MemoryService:
 
         try:
             memory_repository.soft_delete_memory_record(memory_id, memoir_id, participant_id)
-        except Exception as e:
+        except Exception:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to delete memory: {str(e)}"
+                detail="Failed to delete memory."
             )
 
         return {"success": True, "message": "Memory successfully deleted."}

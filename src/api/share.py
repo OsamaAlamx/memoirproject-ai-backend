@@ -1,6 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, status
 
 from src.core.auth import get_current_user
+from src.core.rate_limit import share_limit
 from src.domain.share_service import ShareService, to_link_response
 from src.schemas.share import (
     ShareLinkResponseEnvelope, ShareLinkUpdateRequest, SharedMemoirResponseEnvelope,
@@ -37,7 +38,7 @@ async def read_shared_memoir(token: str):
     data = await ShareService.read_shared_memoir(token)
     return {"success": True, "message": "Operation successful", "data": data}
 
-@reader_router.post("/{token}/join", response_model=ReaderJoinResponseEnvelope)
+@reader_router.post("/{token}/join", response_model=ReaderJoinResponseEnvelope, dependencies=[Depends(share_limit)])
 async def join_shared_memoir(token: str, payload: ReaderJoinRequest):
     data = await ShareService.join_reader(token, payload.display_name)
     return {"success": True, "message": "Welcome.", "data": data}
@@ -47,7 +48,7 @@ async def list_shared_comments(token: str, memory_id: str | None = None):
     data = await ShareService.list_guest_comments(token, memory_id)
     return {"success": True, "message": "Operation successful", "data": data}
 
-@reader_router.post("/{token}/comments", response_model=GuestCommentResponseEnvelope, status_code=status.HTTP_201_CREATED)
+@reader_router.post("/{token}/comments", response_model=GuestCommentResponseEnvelope, status_code=status.HTTP_201_CREATED, dependencies=[Depends(share_limit)])
 async def post_shared_comment(token: str, payload: GuestCommentCreate):
     data = await ShareService.post_guest_comment(token, payload.model_dump())
     return {"success": True, "message": "Comment sent for owner approval.", "data": data}
@@ -57,12 +58,12 @@ async def list_shared_reactions(token: str, participant_id: str | None = None):
     data = await ShareService.get_reactions(token, participant_id)
     return {"success": True, "message": "Operation successful", "data": data}
 
-@reader_router.post("/{token}/reactions", response_model=ReactionToggleResponseEnvelope)
+@reader_router.post("/{token}/reactions", response_model=ReactionToggleResponseEnvelope, dependencies=[Depends(share_limit)])
 async def post_shared_reaction(token: str, payload: ReactionToggleRequest):
     data = await ShareService.post_reaction(token, payload.model_dump())
     return {"success": True, "message": "Operation successful", "data": data}
 
-@reader_router.post("/{token}/export", status_code=status.HTTP_202_ACCEPTED)
+@reader_router.post("/{token}/export", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(share_limit)])
 async def request_reader_export(token: str, payload: ReaderExportRequest, background_tasks: BackgroundTasks):
     """Reader PDF export for the single live link (images + text only).
 

@@ -23,8 +23,8 @@ class PresignedUrlRequest(BaseModel):
         validation_alias="file_type", 
         description="MIME type of the file (e.g., image/jpeg, audio/webm)"
     )
-    
-    # byte_size: int = Field(..., gt=0, description="Size of the file in bytes")
+    kind: str = Field(..., description="Media kind: photo, audio, video")
+    byte_size: int = Field(..., gt=0, le=52428576, description="Size of the file in bytes")
 
     @field_validator('filename')
     @classmethod
@@ -47,6 +47,12 @@ class PresignedUrlRequest(BaseModel):
             raise ValueError("Invalid or unsafe filename provided.")
         return safe_name
 
+
+MIME_TO_KIND = {
+    "image/jpeg": "photo", "image/png": "photo", "image/webp": "photo", "image/heic": "photo",
+    "audio/webm": "audio", "audio/ogg": "audio", "audio/mpeg": "audio",
+    "audio/mp4": "audio", "audio/wav": "audio",
+}
 
 class MediaMetadataRequest(BaseModel):
     """
@@ -73,4 +79,16 @@ class MediaMetadataRequest(BaseModel):
         allowed_kinds = {'photo', 'audio', 'video'}
         if v not in allowed_kinds:
             raise ValueError(f"Invalid media kind '{v}'. Must be one of {allowed_kinds}.")
+        return v
+
+    @field_validator('mime_type')
+    @classmethod
+    def validate_mime_matches_kind(cls, v: str, info) -> str:
+        kind = (info.data or {}).get("kind")
+        expected = MIME_TO_KIND.get(v)
+        if expected is None:
+            raise ValueError("Unsupported file type.")
+        # video kind currently shares audio mime set client-side; allow audio mimes for video
+        if kind and kind != expected and not (kind == "video" and expected == "audio"):
+            raise ValueError(f"MIME {v} does not match kind {kind}.")
         return v

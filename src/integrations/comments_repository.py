@@ -116,19 +116,30 @@ class CommentsRepository:
             raise RepositoryError(f"Database error while fetching comment: {str(e)}")
 
     @staticmethod
+    async def get_memory_memoir_id(memory_id: str) -> str | None:
+        """Resolve the owning memoir for a memory (authz scoping, no row data)."""
+        try:
+            res = supabase_admin.table("memory").select("memoir_id").eq("id", memory_id).execute()
+            return res.data[0]["memoir_id"] if res.data else None
+        except Exception as e:
+            raise RepositoryError(f"Database error while fetching memory: {str(e)}")
+
+    @staticmethod
     async def insert_comment(payload: Dict[str, Any], user_id: str) -> Dict[str, Any]:
         """
-        Securely resolves the user's memoir_participant_id for the given memoir 
+        Securely resolves the user's memoir_participant_id for the given memoir
         and inserts the comment using standard selection without embedding.
         """
         try:
             memoir_id = str(payload["memoir_id"])
 
             # 1. Look up the memoir_participant record for this user in this memoir
+            # Filter removed participants: revoked access cannot post.
             participant_res = supabase_admin.table("memoir_participant")\
                 .select("id")\
                 .eq("memoir_id", memoir_id)\
                 .eq("user_id", user_id)\
+                .is_("removed_at", "null")\
                 .execute()
 
             participants = participant_res.data or []
@@ -139,12 +150,33 @@ class CommentsRepository:
 
             participant_id = participants[0]["id"]
 
+            # 2. Scope-check every referenced target belongs to the same memoir.
+            memory_id = str(payload["memory_id"]) if payload.get("memory_id") else None
+            media_asset_id = str(payload["media_asset_id"]) if payload.get("media_asset_id") else None
+            parent_comment_id = str(payload["parent_comment_id"]) if payload.get("parent_comment_id") else None
+
+            if memory_id:
+                mres = supabase_admin.table("memory").select("id")\
+                    .eq("id", memory_id).eq("memoir_id", memoir_id).execute()
+                if not (mres.data or []):
+                    raise RepositoryError("Target memory does not belong to this memoir.")
+            if media_asset_id:
+                ares = supabase_admin.table("media_asset").select("id")\
+                    .eq("id", media_asset_id).eq("memoir_id", memoir_id).execute()
+                if not (ares.data or []):
+                    raise RepositoryError("Target media does not belong to this memoir.")
+            if parent_comment_id:
+                cres = supabase_admin.table("comment").select("id")\
+                    .eq("id", parent_comment_id).eq("memoir_id", memoir_id).execute()
+                if not (cres.data or []):
+                    raise RepositoryError("Parent comment does not belong to this memoir.")
+
             # 2. Insert the comment using the resolved participant ID
             insert_data = {
                 "memoir_id": memoir_id,
-                "memory_id": str(payload["memory_id"]) if payload.get("memory_id") else None,
-                "media_asset_id": str(payload["media_asset_id"]) if payload.get("media_asset_id") else None,
-                "parent_comment_id": str(payload["parent_comment_id"]) if payload.get("parent_comment_id") else None, 
+                "memory_id": memory_id,
+                "media_asset_id": media_asset_id,
+                "parent_comment_id": parent_comment_id, 
                 "author_participant_id": participant_id,
                 "body": payload["body"].strip()
             }

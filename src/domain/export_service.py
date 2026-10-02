@@ -3,12 +3,17 @@
 @description Business logic for compiling memoir exports, PDF generation, and storage management using pure Python (xhtml2pdf).
 """
 
+import html
 import io
 from fastapi import HTTPException, status
 from xhtml2pdf import pisa
 from src.domain.authorization import verify_active_participant
 from src.integrations.export_repository import ExportRepository
 from src.integrations import storage_adapter
+
+
+def _esc(s: object) -> str:
+    return html.escape(str(s or ""), quote=True)
 
 
 class ExportService:
@@ -78,8 +83,9 @@ class ExportService:
             )
 
     @classmethod
-    def get_latest_export_status(cls, memoir_id: str) -> dict:
+    def get_latest_export_status(cls, memoir_id: str, user_id: str) -> dict:
         """Fetches the latest export job status and signed download URL if ready."""
+        verify_active_participant(str(memoir_id), str(user_id))
         job = ExportRepository.get_latest_export(memoir_id)
         if not job:
             return {"status": "none"}
@@ -98,14 +104,14 @@ class ExportService:
     @staticmethod
     def _render_memoir_html(memoir: dict, memories: list, media_assets: list, transcripts: list) -> str:
         """Generates a high-end, printable book layout HTML string."""
-        memoir_title = memoir.get("title", "My Memoir")
-        memoir_description = memoir.get("description", "A curated collection of life memories.")
+        memoir_title = _esc(memoir.get("title", "My Memoir"))
+        memoir_description = _esc(memoir.get("description", "A curated collection of life memories."))
 
         memories_html = ""
         for mem in memories:
-            title = mem.get("title") or "Untitled Entry"
-            date = mem.get("occurred_start") or mem.get("created_at", "")[:10]
-            body = mem.get("body_text") or ""
+            title = _esc(mem.get("title") or "Untitled Entry")
+            date = _esc(mem.get("occurred_start") or str(mem.get("created_at", ""))[:10])
+            body = _esc(mem.get("body_text") or "")
 
             memories_html += f"""
             <div class="memory-entry">
@@ -121,17 +127,17 @@ class ExportService:
                 img_url = storage_adapter.create_playback_url(ma.get("storage_key"))
                 if not img_url:
                     continue
-                caption = ma.get("caption") or ""
+                caption = _esc(ma.get("caption") or "")
                 photos_html += f"""
                 <div class="photo-container">
-                    <img src="{img_url}" alt="Memory photo" />
+                    <img src="{_esc(img_url)}" alt="Memory photo" />
                     {f'<p class="photo-caption">{caption}</p>' if caption else ''}
                 </div>
                 """
 
         transcripts_html = ""
         for t in transcripts:
-            t_text = t.get("display_text") or ""
+            t_text = _esc(t.get("display_text") or "")
             if t_text:
                 transcripts_html += f"""
                 <div class="transcript-box">

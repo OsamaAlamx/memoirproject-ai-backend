@@ -8,6 +8,7 @@ from typing import List
 from src.schemas.comments import CommentCreate, CommentResponse
 from src.domain.comments_service import CommentsService
 from src.core.auth import get_current_user
+from src.core.rate_limit import share_limit, comment_limit
 router = APIRouter(prefix="/api/comments", tags=["Comments"])
 
 @router.get("/", response_model=List[CommentResponse])
@@ -16,9 +17,10 @@ async def list_comments(
     current_user: dict = Depends(get_current_user),
 ):
     """Fetch all comments linked to a specific memory asset."""
-    return await CommentsService.get_memory_comments(memory_id)
+    user_id = str(current_user.get("user_id") or current_user.get("id") or current_user.get("sub"))
+    return await CommentsService.get_memory_comments(memory_id, user_id)
 
-@router.post("/", response_model=CommentResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=CommentResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(comment_limit)])
 async def post_comment(
     payload: CommentCreate,
     current_user: dict = Depends(get_current_user)

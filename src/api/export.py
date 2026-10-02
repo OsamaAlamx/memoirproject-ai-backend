@@ -37,4 +37,5 @@ def get_latest_export_status(
     current_user: dict = Depends(get_current_user)
 ):
     """Fetches the latest export job status and signed download URL if ready."""
-    return ExportService.get_latest_export_status(memoir_id)
+    from src.core.auth import get_user_id
+    return ExportService.get_latest_export_status(memoir_id, get_user_id(current_user))

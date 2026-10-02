@@ -44,9 +44,10 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         payload = jwt.decode(
             token,
             signing_key.key,
-            algorithms=["HS256", "ES256", "RS256"],
+            algorithms=["RS256", "ES256"],
             audience="authenticated",
-            leeway=60
+            leeway=60,
+            options={"require": ["exp", "sub"]},
         )
 
         user_id = payload.get("sub")
@@ -65,13 +66,13 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 
     except HTTPException:
         raise
-    except jwt.PyJWTError as e:
+    except jwt.PyJWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Could not validate credentials: {str(e)}"
+            detail="Could not validate credentials."
         )
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Authentication failed: {str(e)}"
+            detail="Authentication failed."
         )

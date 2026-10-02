@@ -52,7 +52,7 @@ def _ensure_bucket_exists():
             for b in (buckets or [])
         ]
         if bucket_name not in bucket_names:
-            _client.storage.create_bucket(id=bucket_name, name=bucket_name, options={"public": True})
+            _client.storage.create_bucket(id=bucket_name, name=bucket_name, options={"public": False})
             logger.info(f"Automatically created missing storage bucket: {bucket_name}")
     except Exception as exc:
         logger.warning(f"Could not verify or create storage bucket '{bucket_name}': {exc}")
@@ -103,18 +103,61 @@ def object_exists(key: str) -> int | None:
     return None
 
 
-def create_playback_url(key: str) -> str | None:
-    """Bucket is public, so build the public URL directly instead of
-    depending on the signed-url response shape (which varies by SDK version
-    and was silently returning None)."""
+def create_playback_url(key: str, expires_in: int = 3600) -> str | None:
+    """Private-bucket playback via short-lived signed URL.
+
+    P1 made the bucket private, so public `/object/public/` URLs 403.
+    All feed/share/export callers go through here, so signing here fixes
+    images + audio everywhere at once. 1h TTL avoids expiry mid-read.
+    No fallback to public URL: that would re-open the hole P1 closed.
+    """
     try:
-        base = settings.supabase_url.rstrip("/")
-        bucket = settings.supabase_media_bucket
         clean_key = key.lstrip("/")
-        return f"{base}/storage/v1/object/public/{bucket}/{clean_key}"
-    except Exception as exc:
-        logger.warning("Playback URL build failed key=%s: %s", key, exc)
+        res = _client.storage.from_(settings.supabase_media_bucket).create_signed_url(
+            clean_key, expires_in
+        )
+        url = _extract_signed_url(res)
+        if url and url.startswith("http"):
+            return url
+        # Some SDK versions return a path: join with base.
+        if url:
+            return f"{settings.supabase_url.rstrip('/')}/storage/v1{url}" if url.startswith("/") else url
+        logger.warning("Signed playback URL empty key=%s res_type=%s", key, type(res).__name__)
         return None
+    except Exception as exc:
+        logger.warning("Signed playback URL failed key=%s: %s", key, exc)
+        return None
+
+
+def _extract_signed_url(res: object) -> str | None:
+    """Handle every supabase-py/storage3 response shape (dict/str/object)."""
+    if res is None:
+        return None
+    if isinstance(res, str):
+        return res or None
+    if isinstance(res, dict):
+        for k in ("signedURL", "signed_url", "signedUrl", "url", "signedurl"):
+            v = res.get(k)
+            if isinstance(v, str) and v:
+                return v
+        data = res.get("data")
+        if isinstance(data, dict):
+            return _extract_signed_url(data)
+        return None
+    for attr in ("signedURL", "signed_url", "signedUrl", "url"):
+        v = getattr(res, attr, None)
+        if isinstance(v, str) and v:
+            return v
+    get = getattr(res, "get", None)
+    if callable(get):
+        try:
+            for k in ("signedURL", "signed_url", "signedUrl", "url"):
+                v = get(k)
+                if isinstance(v, str) and v:
+                    return v
+        except Exception:
+            pass
+    return None
 
 
 def remove_object(key: str) -> None:

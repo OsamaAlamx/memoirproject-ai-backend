@@ -7,11 +7,12 @@ from fastapi import APIRouter, Depends, status
 from src.schemas.auth import UserRegisterRequest, UserLoginRequest # Import login request schema
 from src.domain.auth_service import AuthService
 from src.core.auth import get_current_user, get_user_id
+from src.core.rate_limit import auth_limit
 from src.integrations import memoir_repository
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
-@router.post("/signup", status_code=status.HTTP_201_CREATED)
+@router.post("/signup", status_code=status.HTTP_201_CREATED, dependencies=[Depends(auth_limit)])
 def register_user_endpoint(payload: UserRegisterRequest):
     """
     Registers a new user account, triggers automatic database account provisioning,
@@ -32,7 +33,7 @@ def register_user_endpoint(payload: UserRegisterRequest):
         }
     }
     
-@router.post("/login", status_code=status.HTTP_200_OK)
+@router.post("/login", status_code=status.HTTP_200_OK, dependencies=[Depends(auth_limit)])
 def login_user_endpoint(payload: UserLoginRequest):
     """
     Authenticates an existing user and returns their session access token.

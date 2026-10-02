@@ -57,10 +57,13 @@ class AuthService:
 
             user_id = str(user.id) if not isinstance(user, dict) else str(user.get("id"))
 
-            try:
-                auth_repository.ensure_user_account(user_id, email, full_name)
-            except Exception as profile_err:
-                logger.warning("Failed to sync user_account profile for %s: %s", email, str(profile_err))
+            # Only provision user_account once email is confirmed (session exists).
+            # Unconfirmed signups stay in auth.users only: no app rows for fake emails.
+            if session:
+                try:
+                    auth_repository.ensure_user_account(user_id, email, full_name)
+                except Exception as profile_err:
+                    logger.warning("Failed to sync user_account profile for %s: %s", email, str(profile_err))
 
             if not session:
                 logger.info(f"Registration successful for {email}. Email confirmation pending.")
@@ -105,7 +108,7 @@ class AuthService:
             logger.error(f"Unexpected Supabase auth registration error for {email}: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Supabase auth registration failed: {str(e)}"
+                detail="Registration failed. Please try again."
             )
             
     @staticmethod
@@ -117,9 +120,15 @@ class AuthService:
         try:
             response = auth_repository.auth_sign_in(payload.email, payload.password)
         except Exception as e:
+            msg = str(e).lower()
+            if "email not confirmed" in msg or "not confirmed" in msg:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Please verify your email before signing in."
+                )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Invalid email or password: {str(e)}"
+                detail="Invalid email or password."
             )
 
         if not response or not response.session or not response.user:
