@@ -4,9 +4,9 @@
 using Pydantic BaseSettings.
 """
 
-from typing import List, Optional
+from typing import Annotated, List, Optional
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     media_max_bytes: int = Field(52_428_576, validation_alias="MEDIA_MAX_BYTES")
     media_signed_url_ttl: int = Field(300, validation_alias="MEDIA_SIGNED_URL_TTL")
     
-    cors_origins: List[str] = Field(
+    cors_origins: Annotated[List[str], NoDecode] = Field(
         default=["http://localhost:3000", "http://127.0.0.1:3000"],
         validation_alias="CORS_ORIGINS"
     )
@@ -52,8 +52,17 @@ class Settings(BaseSettings):
     @field_validator("cors_origins", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: str | List[str]) -> List[str]:
-        if isinstance(v, str) and not v.startswith("["):
-            return [i.strip() for i in v.split(",")]
+        import json
+        if isinstance(v, str):
+            raw = v.strip()
+            if raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, list):
+                        return [str(i).strip() for i in parsed if str(i).strip()]
+                except Exception:
+                    pass
+            return [i.strip() for i in raw.split(",") if i.strip()]
         elif isinstance(v, list):
             return v
         return ["http://localhost:3000"]
