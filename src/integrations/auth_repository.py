@@ -72,10 +72,21 @@ def ensure_user_account(user_id: str, email: str, full_name: str):
     `memoir.created_by_user_id` FK-references `user_account(id)`, but nothing
     in the signup flow created that row (Supabase Auth only populates
     `auth.users`). Without this, the first memoir insert fails with 23503.
-    Uses the service-role client to bypass RLS.
+    Uses the service-role client to bypass RLS. Never overwrites a stored
+    email/name with empty placeholders (JWT sessions may carry no email).
     """
+    if not email:
+        return None
+    name = (full_name or "").strip()
+    try:
+        existing = supabase_admin.table("user_account").select("full_name").eq("id", user_id).execute()
+        current = (existing.data[0].get("full_name") if existing and existing.data else "") or ""
+    except Exception:
+        current = ""
+    if not name or name == "Memoir Owner":
+        name = current or email
     return supabase_admin.table("user_account").upsert({
         "id": user_id,
         "email": email,
-        "full_name": full_name or "Memoir Owner",
+        "full_name": name,
     }, on_conflict="id").execute()

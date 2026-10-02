@@ -22,8 +22,8 @@ def create_memoir(
     This must be executed first to obtain a memoir_id before adding media or memories.
     """
     user_id = current_user.get("user_id") or current_user.get("id") or current_user.get("sub")
-    
-    user_session = {"user_id": user_id}
+
+    user_session = {"user_id": user_id, "email": current_user.get("email")}
     new_memoir = MemoirService.create_memoir(payload, user_session)
     return {
         "success": True,
