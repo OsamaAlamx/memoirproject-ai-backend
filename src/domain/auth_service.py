@@ -42,6 +42,11 @@ class AuthService:
 
             user_id = str(user.id)
 
+            try:
+                auth_repository.ensure_user_account(user_id, email, full_name)
+            except Exception as profile_err:
+                logger.warning("Failed to sync user_account profile for %s: %s", email, str(profile_err))
+
             if not session:
                 logger.info(f"Registration successful for {email}. Email confirmation pending.")
                 return {
@@ -110,6 +115,16 @@ class AuthService:
 
         user_id = response.user.id
         access_token = response.session.access_token
+
+        try:
+            user_meta = getattr(response.user, "user_metadata", None) or {}
+            auth_repository.ensure_user_account(
+                str(user_id),
+                payload.email,
+                user_meta.get("full_name") or payload.email,
+            )
+        except Exception as profile_err:
+            logger.warning("Failed to sync user_account profile for %s: %s", payload.email, str(profile_err))
 
         try:
             auth_repository.update_last_login(user_id, datetime.now(timezone.utc).isoformat())

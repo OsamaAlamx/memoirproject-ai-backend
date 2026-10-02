@@ -126,6 +126,19 @@ class MemoirService:
             )
 
         user_record = user_res.data[0] if user_res and user_res.data else {}
+        if not user_record:
+            # Self-heal pre-fix accounts (signed up before profile sync existed).
+            from src.integrations import auth_repository
+            try:
+                auth_repository.ensure_user_account(
+                    user_id,
+                    user_session.get("email") or "",
+                    (user_session.get("full_name") or user_session.get("email") or "Memoir Owner"),
+                )
+                user_res = memoir_repository.fetch_user_account(user_id)
+                user_record = user_res.data[0] if user_res and user_res.data else {}
+            except Exception:
+                pass
         display_name = user_record.get("full_name") or "Memoir Owner"
         user_email = user_record.get("email")
 
